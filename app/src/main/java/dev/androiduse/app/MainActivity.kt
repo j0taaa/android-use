@@ -1,6 +1,10 @@
 package dev.androiduse.app
 
 import android.Manifest
+import android.animation.ValueAnimator
+import android.view.HapticFeedbackConstants
+import android.view.animation.PathInterpolator
+import java.util.concurrent.Executors
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
@@ -34,11 +38,23 @@ class MainActivity : Activity() {
     private lateinit var composer: EditText
     private lateinit var send: ChatIcon
     private lateinit var status: TextView
-    private var rendered = ""
+    private lateinit var chatBody: FrameLayout
+    private var displayedSessionId: String? = null
+    private var displayedEntries = emptyList<RunEvent>()
+    private val expandedTools = mutableSetOf<Int>()
+    private val chatDrafts = mutableMapOf<String, String>()
+    private val chatScrolls = mutableMapOf<String, Int>()
+    private var switching = false
+    private var transitionVersion = 0
+    private val historyWorker = Executors.newSingleThreadExecutor()
+    private var historyLoading = false
+    private var historyGeneration = 0
+    private var historySessions = emptyList<Session>()
+    private var historyRows = emptyList<String>()
     private val listener: () -> Unit = {
         val active=AppState.session
         if (awaitingStart || (selected != null && active?.id == selected?.id)) { selected=active; awaitingStart=false }
-        if(page=="Chat") updateChat()
+        if(page=="Chat" && !switching) updateChat()
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,8 +70,25 @@ class MainActivity : Activity() {
         outState.putString("chat_id", selected?.id); outState.putString("draft", if(page=="Chat") composer.text.toString() else draft)
         super.onSaveInstanceState(outState)
     }
-    override fun onResume() { super.onResume(); visible=true; AppState.listeners.add(listener); listener() }
+    override fun onResume() { super.onResume(); visible=true; AppState.listeners.add(listener); listener(); refreshHistory() }
     override fun onPause() { visible=false; AppState.listeners.remove(listener); super.onPause() }
+    override fun onDestroy() {
+        transitionVersion++; historyWorker.shutdownNow()
+        if(::chatBody.isInitialized) chatBody.animate().cancel()
+        super.onDestroy()
+    }
+    private fun refreshHistory() {
+        if(historyLoading || historyWorker.isShutdown) return
+        historyLoading=true
+        val generation=historyGeneration
+        historyWorker.execute {
+            val sessions=Stores.sessions()
+            runOnUiThread {
+                historyLoading=false
+                if(!isDestroyed && generation==historyGeneration) { historySessions=sessions; if(page=="Chat" && drawer.isOpen) populateHistory() }
+            }
+        }
+    }
     @Deprecated("Platform back callback for Android 11 compatibility")
     override fun onBackPressed() { handleBack() }
     private fun handleBack() { when { page=="Settings" -> showChat(); drawer.isOpen -> drawer.close(); else -> finish() } }
@@ -69,11 +102,36 @@ class MainActivity : Activity() {
     }
     private fun hideKeyboard() { (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(composer.windowToken,0); composer.clearFocus() }
     private fun newChat() {
-        hideKeyboard(); draft=""; selected=null; awaitingStart=false
-        showChat()
+        chatDrafts.remove("new")
+        if(selected==null && !switching) { composer.setText(""); draft=""; drawer.close() }
+        else switchConversation(null)
+    }
+    private fun switchConversation(next: Session?) {
+        if(next?.id==selected?.id && !switching) { drawer.close(); return }
+        hideKeyboard()
+        val oldKey=selected?.id ?: "new"
+        chatDrafts[oldKey]=composer.text.toString(); chatScrolls[oldKey]=scroll.scrollY
+        drawer.close()
+        val version=++transitionVersion
+        switching=true
+        chatBody.animate().cancel()
+        fun replace() {
+            if(version!=transitionVersion || page!="Chat" || isDestroyed) return
+            selected=next?.let { AppState.session?.takeIf { active -> active.id==it.id } ?: it }
+            awaitingStart=false; expandedTools.clear()
+            draft=chatDrafts[selected?.id ?: "new"].orEmpty(); composer.setText(draft)
+            updateChat(forceBottom=true)
+            val position=chatScrolls[selected?.id ?: "new"]
+            if(position!=null) scroll.post { if(version==transitionVersion) scroll.scrollTo(0,position) }
+            switching=false
+            chatBody.translationY=dp(8).toFloat()
+            chatBody.animate().alpha(1f).translationY(0f).setDuration(200).setInterpolator(PathInterpolator(.22f,1f,.36f,1f)).start()
+        }
+        if(!ValueAnimator.areAnimatorsEnabled()) { replace(); chatBody.animate().cancel(); chatBody.alpha=1f; chatBody.translationY=0f }
+        else chatBody.animate().alpha(0f).translationY(-dp(6).toFloat()).setDuration(100).withEndAction { replace() }.start()
     }
     private fun showChat() {
-        page="Chat"; rendered=""; base()
+        page="Chat"; displayedEntries=emptyList(); displayedSessionId=null; base()
         drawer=ChatDrawer(this)
         val main=column()
         val header=row().apply { setPadding(dp(10),dp(4),dp(10),dp(4)) }
@@ -82,13 +140,14 @@ class MainActivity : Activity() {
         header.addView(ChatIcon(this,"new","New chat") { newChat() },LinearLayout.LayoutParams(dp(48),dp(48)))
         main.fill(header)
         val center=FrameLayout(this)
+        chatBody=center
         messages=column().apply { setPadding(dp(22),dp(20),dp(22),dp(20)) }
         scroll=ScrollView(this).apply { isFillViewport=true; isVerticalScrollBarEnabled=false; addView(messages) }
         center.addView(scroll,FrameLayout.LayoutParams(-1,-1))
         empty=label("How can I help?",28f,Palette.ink,true).apply { gravity=Gravity.CENTER; letterSpacing=-.025f; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_YES }
         center.addView(empty,FrameLayout.LayoutParams(-1,-1))
         main.addView(center,LinearLayout.LayoutParams(-1,0,1f))
-        status=label("",13f,Palette.muted).apply { gravity=Gravity.CENTER; setPadding(dp(20),dp(8),dp(20),dp(8)); setOnClickListener { selected?.let { if(it.status=="PAUSED") AgentService.current?.resumeRun() else showSession(it) } } }
+        status=label("",13f,Palette.muted).apply { gravity=Gravity.CENTER; setPadding(dp(20),dp(8),dp(20),dp(8)); setOnClickListener { haptic(); selected?.let { if(it.status=="PAUSED") AgentService.current?.resumeRun() else showSession(it) } } }
         main.fill(status)
         val footer=column().apply { setPadding(dp(14),dp(4),dp(14),dp(12)) }
         val compose=row().apply { gravity=Gravity.BOTTOM; background=background(Palette.surface,dp(28).toFloat()); setPadding(dp(8),dp(5),dp(5),dp(5)) }
@@ -97,8 +156,9 @@ class MainActivity : Activity() {
         send=ChatIcon(this,"send","Send message",true) { sendMessage() }
         compose.addView(send,LinearLayout.LayoutParams(dp(46),dp(46)))
         footer.fill(compose); main.fill(footer)
+        historyRows=emptyList()
         history=column().apply { setBackgroundColor(Palette.bg); setPadding(dp(14),dp(12),dp(14),dp(12)) }
-        drawer.attach(main,history); drawer.onOpening={ populateHistory() }
+        drawer.attach(main,history); drawer.onOpening={ populateHistory(); refreshHistory() }
         root.addView(drawer,LinearLayout.LayoutParams(-1,0,1f))
         updateChat(forceBottom=true)
     }
@@ -106,26 +166,47 @@ class MainActivity : Activity() {
         val s=selected
         val active=AgentService.current!=null && AppState.session?.id==s?.id
         val waiting=active && s?.status=="WAITING"
-        val fingerprint="${s?.id}:${s?.events?.size}:${s?.status}:${s?.step}:$active"
-        if(fingerprint!=rendered) {
-            val atBottom=scroll.getChildAt(0).height-scroll.height-scroll.scrollY<dp(120)
+        val entries=mutableListOf<RunEvent>()
+        if(s!=null) {
+            if(s.events.firstOrNull { it.kind=="user" }?.text!=s.task) entries.add(RunEvent("user",s.task,s.started))
+            s.events.filter { it.kind!="system" || !it.text.startsWith("Started ·") }.forEach { event ->
+                val previous=entries.lastOrNull()
+                if(event.kind=="user" || event.kind=="tool" || previous?.text!=event.text) entries.add(event)
+            }
+            if(s.summary.isNotBlank() && entries.none { it.kind=="result" && it.text==s.summary }) entries.add(RunEvent("result",s.summary,s.started))
+        }
+        val sameChat=displayedSessionId==s?.id
+        val previousCount=if(sameChat) displayedEntries.size else 0
+        if(!sameChat || entries!=displayedEntries || forceBottom) {
+            val atBottom=messages.height-scroll.height-scroll.scrollY<dp(120)
             val oldScroll=scroll.scrollY
-            messages.removeAllViews(); rendered=fingerprint
-            empty.visibility=if(s==null) View.VISIBLE else View.GONE
-            if(s!=null) {
-                val entries=mutableListOf<RunEvent>()
-                if(s.events.firstOrNull { it.kind=="user" }?.text!=s.task) entries.add(RunEvent("user",s.task))
-                entries.addAll(s.events.filter { it.kind in setOf("user","agent","question","result") })
-                if(s.summary.isNotBlank() && entries.none { it.kind=="result" && it.text==s.summary }) entries.add(RunEvent("result",s.summary))
-                entries.forEachIndexed { index,e ->
-                    if(index==0 || entries[index-1].text!=e.text || entries[index-1].kind=="user" || e.kind=="user") addMessage(e.text,e.kind=="user")
-                }
-                if(!active) {
-                    messages.fill(label("View activity",12f,Palette.muted).apply { setPadding(0,dp(12),0,dp(12)); setOnClickListener { showSession(s) } })
+            if(!sameChat) { messages.removeAllViews(); displayedEntries=emptyList(); expandedTools.clear() }
+            while(messages.childCount>displayedEntries.size) messages.removeViewAt(messages.childCount-1)
+            entries.forEachIndexed { index,event ->
+                if(displayedEntries.getOrNull(index)!=event) {
+                    val view=eventView(event,index)
+                    if(index<messages.childCount) messages.removeViewAt(index)
+                    messages.addView(view,index,LinearLayout.LayoutParams(-1,-2))
+                    if(sameChat && index>=previousCount && previousCount>0 && !switching && ValueAnimator.areAnimatorsEnabled()) {
+                        view.alpha=0f; view.translationY=dp(6).toFloat()
+                        view.animate().alpha(1f).translationY(0f).setDuration(180).start()
+                    }
                 }
             }
-            scroll.post { if(forceBottom || atBottom) scroll.fullScroll(View.FOCUS_DOWN) else scroll.scrollTo(0,oldScroll) }
+            while(messages.childCount>entries.size) messages.removeViewAt(messages.childCount-1)
+            if(sameChat && previousCount>0 && !switching && visible && hasWindowFocus() && !drawer.isOpen && entries.drop(previousCount).any { it.kind=="question" || it.kind=="result" }) {
+                root.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            }
+            displayedEntries=entries.toList(); displayedSessionId=s?.id
+            scroll.post {
+                if(forceBottom || !sameChat) scroll.fullScroll(View.FOCUS_DOWN)
+                else if(atBottom) scroll.smoothScrollTo(0,messages.height)
+                else scroll.scrollTo(0,oldScroll)
+            }
         }
+        empty.visibility=if(s==null) View.VISIBLE else View.GONE
+        while(messages.childCount>displayedEntries.size) messages.removeViewAt(messages.childCount-1)
+        if(s!=null && !active) messages.fill(label("Usage & details",12f,Palette.muted).apply { setPadding(0,dp(12),0,dp(12)); setOnClickListener { haptic(); showSession(s) } })
         status.text=when { awaitingStart -> "Starting…"; active && s?.status=="PAUSED" -> "Paused · Tap to resume"; waiting -> "Your reply is needed"; active -> "Working on your phone…"; AgentService.current!=null -> "Another chat is running"; else -> "" }
         status.visibility=if(status.text.isEmpty()) View.GONE else View.VISIBLE
         composer.isEnabled=!awaitingStart && (!active || waiting)
@@ -133,24 +214,53 @@ class MainActivity : Activity() {
         send.show(if(active && !waiting) "stop" else "send",if(active && !waiting) "Stop agent" else "Send message")
         send.isEnabled=!awaitingStart
     }
-    private fun addMessage(text: String,user: Boolean) {
-        val container=row().apply { gravity=if(user) Gravity.END else Gravity.START }
-        val message=label(text,16f).apply {
-            setTextIsSelectable(true); setLineSpacing(dp(4).toFloat(),1f)
-            if(user) { background=background(Palette.surface,dp(22).toFloat()); setPadding(dp(16),dp(12),dp(16),dp(12)); maxWidth=(resources.displayMetrics.widthPixels*.82f).toInt() }
+    private fun eventView(event: RunEvent, index: Int): View {
+        val wrapper=column()
+        if(event.kind in setOf("tool","error","system")) {
+            val card=column().apply { background=background(Palette.surface,dp(14).toFloat()); setPadding(dp(14),dp(11),dp(14),dp(11)) }
+            val state=if(event.state=="running" && selected?.status !in setOf("RUNNING","PAUSED","WAITING")) "unknown" else event.state
+            val mark=when { event.kind=="error" || state=="error" -> "!"; state=="running" -> "◌"; state=="done" -> "✓"; state=="unknown" -> "·"; else -> "↳" }
+            val suffix=when(state) { "running" -> " · Running"; "error" -> " · Failed"; "unknown" -> " · Check outcome"; else -> "" }
+            card.fill(label("$mark  ${event.text}$suffix",13f,if(event.kind=="error" || state=="error") Palette.error else Palette.muted))
+            if(event.details.isNotBlank()) {
+                val details=label(event.details,12f,Palette.muted).apply {
+                    setTextIsSelectable(true); setPadding(0,dp(10),0,0)
+                    visibility=if(index in expandedTools) View.VISIBLE else View.GONE
+                }
+                card.fill(details)
+                card.contentDescription="${event.text}$suffix. Tap for details"
+                card.isFocusable=true
+                card.setOnClickListener {
+                    card.haptic()
+                    if(!expandedTools.add(index)) expandedTools.remove(index)
+                    details.visibility=if(index in expandedTools) View.VISIBLE else View.GONE
+                }
+            }
+            wrapper.fill(card); wrapper.gap(12)
+        } else {
+            val user=event.kind=="user"
+            val container=row().apply { gravity=if(user) Gravity.END else Gravity.START }
+            val message=label(event.text,16f).apply {
+                setTextIsSelectable(true); setLineSpacing(dp(4).toFloat(),1f)
+                if(user) { background=background(Palette.surface,dp(22).toFloat()); setPadding(dp(16),dp(12),dp(16),dp(12)); maxWidth=(resources.displayMetrics.widthPixels*.82f).toInt() }
+            }
+            container.addView(message,LinearLayout.LayoutParams(if(user) -2 else -1,-2))
+            wrapper.fill(container); wrapper.gap(24)
         }
-        container.addView(message,LinearLayout.LayoutParams(if(user) -2 else -1,-2))
-        messages.fill(container); messages.gap(24)
+        return wrapper
     }
     private fun populateHistory() {
+        val sessions=historySessions.toMutableList()
+        AppState.session?.let { active -> sessions.removeAll { it.id==active.id }; sessions.add(0,active) }
+        val rows=sessions.map { "${it.id}:${it.task}:${it.started}" } + "selected:${selected?.id}"
+        if(rows==historyRows) return
+        historyRows=rows
         history.removeAllViews()
         val top=row()
         top.addView(label("Chats",22f,Palette.ink,true),LinearLayout.LayoutParams(0,-2,1f))
         top.addView(ChatIcon(this,"new","Start a new chat") { newChat() },LinearLayout.LayoutParams(dp(48),dp(48)))
         history.fill(top); history.gap(20)
         val list=column()
-        val sessions=Stores.sessions().toMutableList()
-        AppState.session?.takeIf { AgentService.current!=null }?.let { active -> sessions.removeAll { it.id==active.id }; sessions.add(0,active) }
         var previousDate=""
         sessions.forEach { s ->
             val date=SimpleDateFormat("MMM d",Locale.getDefault()).format(Date(s.started))
@@ -160,12 +270,12 @@ class MainActivity : Activity() {
                 setPadding(dp(12),dp(12),dp(12),dp(12))
                 if(s.id==selected?.id) background=background(Palette.surface,dp(12).toFloat())
                 isClickable=true; isFocusable=true
-                setOnClickListener { draft=""; selected=AppState.session?.takeIf { it.id==s.id } ?: s; showChat() }
+                setOnClickListener { haptic(); switchConversation(s) }
             })
         }
         if(sessions.isEmpty()) list.fill(label("No chats yet",14f,Palette.muted).apply { setPadding(dp(12),dp(16),0,0) })
         history.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(list) },LinearLayout.LayoutParams(-1,0,1f))
-        val settings=row().apply { setPadding(0,dp(8),0,0); isClickable=true; isFocusable=true; contentDescription="Settings"; setOnClickListener { showSettings() } }
+        val settings=row().apply { setPadding(0,dp(8),0,0); isClickable=true; isFocusable=true; contentDescription="Settings"; setOnClickListener { haptic(); showSettings() } }
         settings.addView(ChatIcon(this,"settings","Open settings") { showSettings() },LinearLayout.LayoutParams(dp(48),dp(48)))
         settings.addView(label("Settings",16f,Palette.ink,true)); history.fill(settings)
     }
@@ -195,6 +305,7 @@ class MainActivity : Activity() {
     }
     private fun showSettings() {
         if(page=="Chat") { draft=composer.text.toString(); hideKeyboard() }
+        transitionVersion++; switching=false; chatBody.animate().cancel()
         page="Settings"; base()
         val header=row().apply { setPadding(dp(10),dp(4),dp(16),dp(4)) }
         header.addView(ChatIcon(this,"back","Back to chat") { showChat() },LinearLayout.LayoutParams(dp(48),dp(48)))
@@ -240,16 +351,17 @@ class MainActivity : Activity() {
             }
         }
         val screenshots = Switch(this).apply { text = "Allow screenshots"; setTextColor(Palette.ink); isChecked = c.allowScreenshots; textSize = 14f }
+        screenshots.setOnCheckedChangeListener { button, _ -> button.haptic() }
         content.fill(screenshots); content.gap(16)
         content.fill(label("Maximum steps per message", 13f, Palette.muted)); content.gap(6)
         val steps = field("24", c.maxSteps.toString()).apply { inputType = InputType.TYPE_CLASS_NUMBER }; content.fill(steps); content.gap(14)
         content.fill(label("Input-token budget per message", 13f, Palette.muted)); content.gap(6)
-        val tokens = field("100000", c.maxInputTokens.toString()).apply { inputType = InputType.TYPE_CLASS_NUMBER }; content.fill(tokens); content.gap(16)
+        val tokens = field(ProviderConfig.DEFAULT_INPUT_TOKENS.toString(), c.maxInputTokens.toString()).apply { inputType = InputType.TYPE_CLASS_NUMBER }; content.fill(tokens); content.gap(16)
         fun save(): ProviderConfig {
             check(AgentService.current == null) { "Stop the active task before changing its connection." }
             val chosen = if(provider.selectedItemPosition == 1) "anthropic" else "openai"
             val existingKey = if(chosen == c.provider && endpoint.text.toString().trim().trimEnd('/') == c.endpoint.trimEnd('/')) c.apiKey else ""
-            val next = ProviderConfig(chosen, endpoint.text.toString().trim(), model.text.toString().trim(), key.text.toString().trim().ifBlank { existingKey }, steps.text.toString().toIntOrNull() ?: 24, tokens.text.toString().toIntOrNull() ?: 100000, screenshots.isChecked)
+            val next = ProviderConfig(chosen, endpoint.text.toString().trim(), model.text.toString().trim(), key.text.toString().trim().ifBlank { existingKey }, steps.text.toString().toIntOrNull() ?: 24, tokens.text.toString().toIntOrNull() ?: ProviderConfig.DEFAULT_INPUT_TOKENS, screenshots.isChecked)
             Stores.saveConfig(next); return next
         }
         content.fill(action("Save", true) { try { save(); toast("Settings saved"); showChat() } catch (e: Exception) { toast(e.message.orEmpty()) } }); content.gap(10)
@@ -271,7 +383,7 @@ class MainActivity : Activity() {
         content.fill(action("Delete all chats") {
             AlertDialog.Builder(this).setTitle("Delete all chats?").setMessage("This removes saved conversations from this phone.")
                 .setNegativeButton("Cancel", null).setPositiveButton("Delete") { _, _ ->
-                    try { Stores.clearHistory(); selected = null; toast("Chats deleted") } catch (e: Exception) { toast(e.message.orEmpty()) }
+                    try { Stores.clearHistory(); selected = null; historyGeneration++; historySessions=emptyList(); chatDrafts.clear(); chatScrolls.clear(); toast("Chats deleted") } catch (e: Exception) { toast(e.message.orEmpty()) }
                 }.show()
         }); content.gap(20)
         content.fill(label("Android Use ${BuildConfig.VERSION_NAME}", 12f, Palette.muted))
@@ -279,7 +391,7 @@ class MainActivity : Activity() {
     private fun showSession(s: Session) {
         val report = buildString {
             append("${s.task}\n\n${s.status} · ${s.model}\n${s.step} steps\nInput: ${s.input} · Cache reads: ${s.cached} · Cache writes: ${s.cacheWrite} · Output: ${s.output}\n\n")
-            s.events.forEach { append("${it.kind.uppercase()}\n${it.text}\n\n") }
+            s.events.forEach { append("${it.kind.uppercase()} ${it.state}\n${it.text}\n"); if(it.details.isNotBlank()) append("${it.details}\n"); append("\n") }
             if (s.pending != null) append("An action has an uncertain outcome. Check the phone before repeating it.\n")
         }
         val view = label(report, 13f, Palette.ink).apply { setPadding(dp(22), dp(16), dp(22), dp(16)); setTextIsSelectable(true); typeface = Typeface.MONOSPACE }

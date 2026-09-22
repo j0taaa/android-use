@@ -98,4 +98,13 @@ class AgentCoreTest {
         }
     }
 
+    @Test fun `default token budget is one hundred times the original and is valid`() {
+        val config=ProviderConfig(apiKey="test")
+        assertEquals(100000*100,config.maxInputTokens)
+        config.validate()
+        config.copy(maxInputTokens=100000).validate()
+        try { config.copy(maxInputTokens=100000001).validate(); fail("Unbounded budget accepted") }
+        catch(_:IllegalArgumentException) {}
+    }
+
 }

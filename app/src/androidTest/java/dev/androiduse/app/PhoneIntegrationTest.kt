@@ -125,12 +125,14 @@ class PhoneIntegrationTest {
             }
             server.start()
             Stores.saveConfig(ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="instrumentation-only",model="scripted-test"))
+            val previousId=AppState.session?.id
             inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Save a practice note")) }
-            waitUntil(60000) { AppState.session?.status in setOf("COMPLETE","ERROR","INCOMPLETE","LIMIT") }
+            waitUntil(60000) { AppState.session?.id!=previousId && AgentService.current==null && AppState.session?.status in setOf("COMPLETE","ERROR","INCOMPLETE","LIMIT") }
             val s=AppState.session!!
             assertEquals(s.summary,"COMPLETE",s.status)
             assertTrue(phone.observe().toString().contains("Saved: Agent HTTP loop verified"))
             assertEquals(5,requests.size)
+            assertEquals(listOf("done","done","done","done"),s.events.filter { it.kind=="tool" }.map { it.state })
             for(i in 1 until requests.size) {
                 val prev=requests[i-1].getJSONArray("messages"); val next=requests[i].getJSONArray("messages")
                 for(j in 0 until prev.length()) assertEquals("Prefix changed at $i/$j",prev.get(j).toString(),next.get(j).toString())
@@ -316,6 +318,66 @@ class PhoneIntegrationTest {
             device.pressBack()
             find(androidx.test.uiautomator.By.desc("Open chat history"))
             find(androidx.test.uiautomator.By.text("I still have our conversation."))
+        }
+    }
+
+    @Test fun tokenBudgetMigrationUpdatesOldDefaultOnceAndPreservesCustomValues() {
+        val prefs=context.getSharedPreferences("settings",0)
+        prefs.edit().remove("token_default_v3").putInt("tokens",100000).commit()
+        Stores.migrateTokenDefault()
+        assertEquals(10000000,Stores.config().maxInputTokens)
+        prefs.edit().putInt("tokens",100000).commit()
+        Stores.migrateTokenDefault()
+        assertEquals("An intentional setting after upgrade must stay intact",100000,Stores.config().maxInputTokens)
+        prefs.edit().remove("token_default_v3").putInt("tokens",250000).commit()
+        Stores.migrateTokenDefault()
+        assertEquals(250000,Stores.config().maxInputTokens)
+        prefs.edit().remove("tokens").commit()
+        assertEquals(10000000,Stores.config().maxInputTokens)
+    }
+
+    @Test fun chatShowsLiveAgentMessagesToolProgressAndPersistedDetails() {
+        val device=androidx.test.uiautomator.UiDevice.getInstance(inst)
+        fun find(selector: androidx.test.uiautomator.BySelector): androidx.test.uiautomator.UiObject2 =
+            device.wait(androidx.test.uiautomator.Until.findObject(selector),7000) ?: error("Missing $selector")
+        MockWebServer().use { server ->
+            val tool=obj("id" to "wait1", "type" to "function", "function" to obj("name" to "wait", "arguments" to obj("milliseconds" to 3500).toString()))
+            val message=obj("role" to "assistant", "content" to "I am checking the current screen.", "tool_calls" to arr(tool))
+            val body=obj("choices" to arr(obj("finish_reason" to "tool_calls", "message" to message)))
+            server.enqueue(MockResponse().setBody(body.toString()))
+            server.enqueue(response(1,"finish",obj("summary" to "The screen check is complete.","success" to true)))
+            Stores.saveConfig(ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="ui-test",model="timeline-test"))
+            if(android.os.Build.VERSION.SDK_INT>=33) shell("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
+            inst.startActivitySync(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+            inst.waitForIdleSync(); device.waitForIdle()
+            find(androidx.test.uiautomator.By.desc("Message")).text="Check the current screen"
+            find(androidx.test.uiautomator.By.desc("Send message")).click()
+            find(androidx.test.uiautomator.By.text("I am checking the current screen."))
+            find(androidx.test.uiautomator.By.textContains("Wait · Running"))
+            find(androidx.test.uiautomator.By.descContains("Tap for details")).click()
+            find(androidx.test.uiautomator.By.textContains("3500"))
+            waitUntil { AgentService.current==null && AppState.session?.summary=="The screen check is complete." }
+            find(androidx.test.uiautomator.By.text("The screen check is complete."))
+            find(androidx.test.uiautomator.By.text("✓  Wait"))
+            find(androidx.test.uiautomator.By.textContains("Tool completed."))
+            val saved=Stores.loadSession(AppState.session!!.id)!!
+            assertEquals("done",saved.events.first { it.kind=="tool" }.state)
+            assertTrue(saved.events.first { it.kind=="tool" }.details.contains("3500"))
+            device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"inline-actions.png"))
+            find(androidx.test.uiautomator.By.desc("Message")).text="A draft for this chat"
+            find(androidx.test.uiautomator.By.desc("New chat")).click()
+            find(androidx.test.uiautomator.By.text("How can I help?"))
+            find(androidx.test.uiautomator.By.desc("Open chat history")).click()
+            find(androidx.test.uiautomator.By.text("Check the current screen")).click()
+            find(androidx.test.uiautomator.By.text("A draft for this chat"))
+            find(androidx.test.uiautomator.By.text("✓  Wait"))
+            // Reverse direction to dismiss the drawer with a short, quick left swipe.
+            find(androidx.test.uiautomator.By.desc("Open chat history")).click()
+            find(androidx.test.uiautomator.By.text("Chats"))
+            device.waitForIdle()
+            device.swipe(device.displayWidth*2/3,device.displayHeight/2,device.displayWidth/8,device.displayHeight/2,12)
+            find(androidx.test.uiautomator.By.desc("Open chat history"))
+            assertFalse(device.hasObject(androidx.test.uiautomator.By.text("Chats")))
         }
     }
 

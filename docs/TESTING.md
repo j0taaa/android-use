@@ -1,17 +1,17 @@
 # Validation record
 
-Date: 22 September 2026. App: Android Use 0.2.0, signed release variant, package `dev.androiduse.app`.
+Date: 22 September 2026. App: Android Use 0.3.0, signed release variant, package `dev.androiduse.app`.
 
 | Check | Result |
 | --- | --- |
-| JVM core tests | 10 passed |
-| Android 15 / API 35, Pixel 6 x86_64 emulator | 10 instrumented release tests passed |
-| Android 11 / API 30, Pixel 6 x86_64 emulator | 10 instrumented release tests passed |
+| JVM core tests | 11 passed |
+| Android 15 / API 35, Pixel 6 x86_64 emulator | 12 instrumented release tests passed |
+| Android 11 / API 30, Pixel 6 x86_64 emulator | 12 instrumented release tests passed |
 | Android release lint | Passed, 0 errors; 18 non-blocking warnings (primarily localization, pinned dependency versions, application-context storage, and version-specific metadata) |
 | Release APK signature | Verified; APK Signature Scheme v2, RSA 3072-bit signing key |
 | Release debuggable flag | false |
 | Test-server / instrumentation classes in app APK | Absent |
-| Native UI | New chat, conversation, drawer, settings and keyboard layout visually inspected in emulator screenshots |
+| Native UI | New chat, inline agent actions, drawer, settings and keyboard layout visually inspected in emulator screenshots |
 
 The instrumented tests exercise real Android accessibility operations:
 
@@ -27,16 +27,21 @@ The instrumented tests exercise real Android accessibility operations:
 9. Cold launch to a blank chat, swipe-open history, selecting a saved conversation, new chat, draft restoration after rotation, and settings navigation.
 10. Sending initial and follow-up messages through the actual UI, checking the keyboard does not cover the composer, displaying both replies, and dismissing the history drawer using system Back.
 
-Core tests cover immutable request prefixes for both provider formats, tool-result image placement, provider-reported cache accounting, argument validation, endpoint validation, authentication headers, error-body redaction, cancellation, rejection of truncated tool calls, and resolving interrupted calls without replaying actions or rewriting earlier context (both providers).
+11. One-time upgrade of the old 100,000-token default to 10,000,000, preserving other custom budgets and later intentional edits.
+12. Live assistant text and running/completed action cards in the chat, expandable persisted tool details, per-chat draft restoration, and swipe dismissal of the drawer.
+
+Core tests cover immutable request prefixes for both provider formats, tool-result image placement, provider-reported cache accounting, argument validation, endpoint validation, authentication headers, error-body redaction, cancellation, rejection of truncated tool calls, and resolving interrupted calls without replaying actions or rewriting earlier context (both providers), plus validation of the 100× larger default token budget.
 
 The test HTTP servers execute inside the emulator's instrumentation APK. They are not included in the application APK and do not create a runtime dependency on a computer or a development server. The signed app uses real HTTPS provider adapters.
 
-**Not verified in this update’s automated checks:** live paid inference, real provider cache-hit rates or dollar savings, reasoning quality on arbitrary tasks, physical ARM devices, OEM-specific background restrictions, and operation on every third-party app. No user API key was supplied. Cache numbers returned by the scripted servers are fixtures used to test accounting, not measured real-provider cache hits.
+**Not verified in this update’s automated checks:** physical haptic feel, live paid inference, real provider cache-hit rates or dollar savings, reasoning quality on arbitrary tasks, physical ARM devices, OEM-specific background restrictions, and operation on every third-party app. No user API key was supplied. Cache numbers returned by the scripted servers are fixtures used to test accounting, not measured real-provider cache hits.
 
 The API 30 and API 35 AVDs and SDK remain installed under `~/Android/Sdk` and `~/.android/avd`. XML reports and visual captures are retained locally in `artifacts/`. Tests may use ADB to provision the emulator; the app itself contains no ADB integration.
 
-Final APK SHA-256: `8dbe0b9767462f47a69d1d372b0970e70b6aa0911aebb176b6f674e9ff0b3533`.
+Final APK SHA-256: `c5db861882a0787bd8418ed038d23b15aadea8511d65a7f7d3de5006c8838a5e`.
 
-Public download verification: HTTPS 200, 3,147,788 bytes. Downloaded bytes match the signed APK SHA-256 above.
+Public download verification: HTTPS 200, 3,162,008 bytes. Downloaded bytes match the signed APK SHA-256 above.
 
-Upgrade signing: v0.2.0 and v0.1.0 have the same signing certificate; package identity and Android Keystore alias are unchanged. The release can install over v0.1.0. Old history remains readable; replies require a chat created in v0.2.0 or later.
+Upgrade signing: v0.3.0, v0.2.0 and v0.1.0 have the same signing certificate; package identity and Android Keystore alias are unchanged. The release can install over v0.1.0 or v0.2.0. Old history remains readable; replies require a chat created in v0.2.0 or later.
+
+Haptic feedback uses Android’s standard view feedback and respects system settings. The emulator verifies interaction behavior; it cannot establish tactile quality on physical phones. Drawer and conversation animations also respect the system animation setting.

@@ -1,6 +1,6 @@
 # Android Use
 
-[Download the signed v0.2.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.2.0/android-use-0.2.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
+[Download the signed v0.3.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.3.0/android-use-0.3.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
 
 GitHub release downloads do not depend on a development computer. The installation-page mirror requires its hosting PC to stay online.
 
@@ -10,13 +10,15 @@ This is an early usable release, not a claim of reliable automation in every app
 
 ## Chat interface
 
-Open directly to a new chat. Send a message from the bottom composer, swipe right (or tap the menu) to find earlier conversations, and open Settings from the drawer. Messages remain visible as a conversation; detailed phone actions and token usage are available under **View activity**.
+Open directly to a new chat. Send a message from the bottom composer, swipe right (or tap the menu) to find earlier conversations, and open Settings from the drawer. Agent messages and phone actions appear directly in the conversation. Action cards show progress and outcomes; tap a card for its details. Token usage remains under **Usage & details**.
 
-<img src="docs/screenshots/new-chat.png" width="240" alt="Light new chat screen"> <img src="docs/screenshots/conversation.png" width="240" alt="User and assistant messages"> <img src="docs/screenshots/chat-drawer.png" width="240" alt="Conversation history and Settings drawer">
+<img src="docs/screenshots/new-chat.png" width="240" alt="Light new chat screen"> <img src="docs/screenshots/inline-actions.png" width="240" alt="Agent messages and an expanded phone action"> <img src="docs/screenshots/chat-drawer.png" width="240" alt="Conversation history and Settings drawer">
 
 Screenshots show sample conversation data.
 
-You can send follow-up messages in chats created with v0.2. The app reloads the encrypted provider transcript and appends new messages without rewriting earlier context. Keep the same provider, endpoint and model for that chat. Older v0.1 history remains readable; start a new chat for replies.
+The drawer follows your finger, settles according to swipe speed, and fades its backdrop. Switching chats crossfades the conversation while keeping the header and composer in place, and restores each chat’s draft and scroll position during the activity’s lifetime. Controls and new question/completion messages provide light haptic feedback, respecting Android settings. Animations respect the system animation setting.
+
+You can send follow-up messages in chats created with v0.2 or later. The app reloads the encrypted provider transcript and appends new messages without rewriting earlier context. Keep the same provider, endpoint and model for that chat. Older v0.1 history remains readable; start a new chat for replies.
 
 ## Install and use
 
@@ -38,8 +40,10 @@ The agent is implemented in Kotlin rather than Pi. The original research plan co
 - OpenAI requests use a stable `prompt_cache_key` on the official endpoint. Compatible endpoints receive standard Chat Completions requests without OpenAI-specific cache settings.
 - Anthropic requests enable automatic ephemeral prompt caching through top-level `cache_control`.
 - Screenshots can be disabled in settings, are requested as a tool, and limited to five per message. Text observations are bounded to 160 visible meaningful nodes.
-- **View activity** shows **provider-reported** input, output, cache-read, and cache-write tokens. Input limits include cached tokens and are checked between requests; one request can cross the budget.
-- Default limits are 24 model turns per user message, 100,000 cumulative input tokens per user message, a 15-minute run deadline checked between turns, and 6 MB of serialized conversation. There is no hidden automatic context rewriting. Send a follow-up to continue within a new run budget; start a new chat if the conversation reaches the context-size limit.
+- **Usage & details** shows **provider-reported** input, output, cache-read, and cache-write tokens. Input limits include cached tokens and are checked between requests; one request can cross the budget.
+- Default limits are 24 model turns per user message, 10,000,000 cumulative input tokens per user message, a 15-minute run deadline checked between turns, and 6 MB of serialized conversation. There is no hidden automatic context rewriting. Send a follow-up to continue within a new run budget; start a new chat if the conversation reaches the context-size limit.
+
+The v0.3 upgrade changes a stored 100,000-token default to 10,000,000 once. Other saved limits are preserved, and you can still edit the budget in Settings.
 
 Cache hits are determined by the provider, selected model, prefix length, expiry, and routing. Stable requests enable reuse but cannot guarantee it. This repository tests prefix preservation; it does not claim measured live-provider savings.
 
@@ -112,7 +116,7 @@ Add `-no-window -no-audio` for headless use. Hardware acceleration uses `/dev/kv
 ./gradlew -PtestBuildType=release :app:testReleaseUnitTest :app:connectedReleaseAndroidTest :app:lintRelease
 ```
 
-Instrumented tests enable accessibility on the emulator using the test harness, exercise actual Android windows, and use a local scripted HTTP server for repeatable model responses. This server exists only in the test APK; it is not bundled into the app. The tests cover real controls, cross-app navigation, screenshot image payloads, stale-reference rejection, prefix preservation, cache usage parsing, encrypted credentials, cancellation, pause/resume, Anthropic question/reply behavior, exclusion of the agent's own controls, encrypted chat continuation, UI message sending, drawer navigation, rotation, and keyboard layout. See [docs/TESTING.md](docs/TESTING.md) for recorded results and limitations.
+Instrumented tests enable accessibility on the emulator using the test harness, exercise actual Android windows, and use a local scripted HTTP server for repeatable model responses. This server exists only in the test APK; it is not bundled into the app. The tests cover real controls, cross-app navigation, screenshot image payloads, stale-reference rejection, prefix preservation, cache usage parsing, encrypted credentials, cancellation, pause/resume, Anthropic question/reply behavior, exclusion of the agent's own controls, encrypted chat continuation, UI message sending, drawer navigation, rotation, keyboard layout, live inline action states, conversation draft restoration, and token-default migration. See [docs/TESTING.md](docs/TESTING.md) for recorded results and limitations.
 
 ## Research
 

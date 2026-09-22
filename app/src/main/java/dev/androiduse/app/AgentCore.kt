@@ -18,8 +18,9 @@ fun JSONArray.objects(): List<JSONObject> = (0 until length()).map { getJSONObje
 data class ProviderConfig(
     val provider: String = "openai", val endpoint: String = "https://api.openai.com/v1",
     val model: String = "gpt-4.1-mini", val apiKey: String = "", val maxSteps: Int = 24,
-    val maxInputTokens: Int = 100000, val allowScreenshots: Boolean = true
+    val maxInputTokens: Int = DEFAULT_INPUT_TOKENS, val allowScreenshots: Boolean = true
 ) {
+    companion object { const val DEFAULT_INPUT_TOKENS = 10_000_000 }
     fun validate() {
         require(provider in listOf("openai", "anthropic")) { "Choose a supported provider." }
         val uri = try { URI(endpoint) } catch (_: Exception) { throw IllegalArgumentException("Enter a valid API base URL.") }
@@ -27,7 +28,7 @@ data class ProviderConfig(
         require(uri.scheme == "https" || (uri.scheme == "http" && uri.host in listOf("localhost", "127.0.0.1", "10.0.2.2"))) { "Use HTTPS. HTTP is allowed only for local development endpoints." }
         require(model.isNotBlank()) { "Enter a model ID." }
         require(apiKey.isNotBlank()) { "Add your API key in Settings." }
-        require(maxSteps in 1..100 && maxInputTokens in 1000..1000000) { "Task limits are out of range." }
+        require(maxSteps in 1..100 && maxInputTokens in 1000..100_000_000) { "Task limits are out of range." }
     }
 }
 

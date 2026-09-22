@@ -1,5 +1,6 @@
 package dev.androiduse.app
 
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -7,6 +8,8 @@ import android.graphics.Path
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.VelocityTracker
+import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import kotlin.math.abs
 
@@ -15,7 +18,7 @@ class ChatIcon(context: Context, var symbol: String, description: String, privat
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     init {
         contentDescription = description; isFocusable = true; isClickable = true
-        setOnClickListener { click() }
+        setOnClickListener { haptic(); click() }
         if (!filled) {
             val attrs = context.obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackgroundBorderless))
             background = attrs.getDrawable(0); attrs.recycle()
@@ -53,43 +56,70 @@ class ChatIcon(context: Context, var symbol: String, description: String, privat
     fun show(symbol: String, description: String) { this.symbol=symbol; contentDescription=description; invalidate() }
 }
 
-/** A horizontal gesture opens history without stealing vertical chat scrolling. */
+/** One progress value drives drag, scrim and parallax, including interrupted animations. */
 class ChatDrawer(context: Context) : FrameLayout(context) {
     lateinit var page: View
     lateinit var panel: View
-    private val shade = View(context).apply { setBackgroundColor(0x55000000); visibility=GONE }
+    private val shade = View(context).apply { setBackgroundColor(0x44000000); visibility=GONE }
     var isOpen = false; private set
     var onOpening: () -> Unit = {}
+    private var progress=0f
+    private var animation: ValueAnimator?=null
+    private var velocity: VelocityTracker?=null
     private var downX=0f; private var downY=0f; private var dragging=false; private var outside=false
     private var starting=0f
     private val slop=ViewConfiguration.get(context).scaledTouchSlop
+    private val minFling=context.dp(450)
+    private val easing=PathInterpolator(.22f,1f,.36f,1f)
     fun attach(page: View, panel: View) {
         this.page=page; this.panel=panel
         addView(page,LayoutParams(-1,-1)); addView(shade,LayoutParams(-1,-1))
         addView(panel,LayoutParams((resources.displayMetrics.widthPixels*.84f).toInt().coerceAtMost(context.dp(360)),-1))
-        panel.visibility=GONE; panel.elevation=context.dp(5).toFloat()
+        panel.elevation=context.dp(5).toFloat(); drawProgress(0f)
     }
     fun open() { onOpening(); settle(true) }
     fun close() { settle(false) }
-    private fun settle(open: Boolean) {
-        panel.animate().cancel(); shade.animate().cancel()
-        if(open && panel.visibility!=VISIBLE) { panel.translationX=-panel.layoutParams.width.toFloat(); shade.alpha=0f }
-        panel.visibility=VISIBLE; shade.visibility=VISIBLE; isOpen=open
-        page.importantForAccessibility=if(open) IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else IMPORTANT_FOR_ACCESSIBILITY_AUTO
-        panel.animate().translationX(if(open) 0f else -panel.layoutParams.width.toFloat()).setDuration(190).withEndAction {
-            if(!isOpen) { panel.visibility=GONE; shade.visibility=GONE }
-        }.start()
-        shade.animate().alpha(if(open) 1f else 0f).setDuration(190).start()
+    private fun drawProgress(value: Float) {
+        progress=value.coerceIn(0f,1f)
+        panel.translationX=-(1-progress)*panel.layoutParams.width
+        page.translationX=context.dp(24)*progress
+        shade.alpha=progress
+        panel.visibility=if(progress>0f) VISIBLE else GONE
+        shade.visibility=panel.visibility
+        page.importantForAccessibility=if(progress>0f) IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else IMPORTANT_FOR_ACCESSIBILITY_AUTO
+    }
+    private fun settle(open: Boolean, fromGesture: Boolean=false) {
+        animation?.cancel()
+        if(fromGesture && isOpen!=open) haptic()
+        isOpen=open
+        val target=if(open) 1f else 0f
+        if(!ValueAnimator.areAnimatorsEnabled()) { drawProgress(target); return }
+        animation=ValueAnimator.ofFloat(progress,target).apply {
+            duration=(160+140*abs(target-progress)).toLong(); interpolator=easing
+            addUpdateListener { drawProgress(it.animatedValue as Float) }; start()
+        }
+    }
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if(event.actionMasked==MotionEvent.ACTION_DOWN) { velocity?.recycle(); velocity=VelocityTracker.obtain() }
+        velocity?.addMovement(event)
+        val result=super.dispatchTouchEvent(event)
+        if(event.actionMasked==MotionEvent.ACTION_UP || event.actionMasked==MotionEvent.ACTION_CANCEL) { velocity?.recycle(); velocity=null }
+        return result
     }
     override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
         when(event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> { downX=event.x; downY=event.y; dragging=false; outside=isOpen && event.x>panel.width; starting=if(isOpen) 1f else 0f; if(outside) return true }
+            MotionEvent.ACTION_DOWN -> {
+                downX=event.x; downY=event.y; dragging=false; starting=progress
+                outside=progress>0f && event.x>panel.layoutParams.width*progress
+                if(outside) return true
+            }
             MotionEvent.ACTION_MOVE -> {
                 val dx=event.x-downX; val dy=event.y-downY
-                if(abs(dx)>slop*2 && abs(dx)>abs(dy)*1.5f && (isOpen || (dx>0 && downY<height-context.dp(100)))) {
-                    if(!isOpen) onOpening()
-                    panel.animate().cancel(); shade.animate().cancel(); panel.visibility=VISIBLE; shade.visibility=VISIBLE
-                    dragging=true; return true
+                if(abs(dx)>slop*2 && abs(dx)>abs(dy)*1.5f && (progress>0f || (dx>0 && downY<height-context.dp(100)))) {
+                    if(progress==0f) onOpening()
+                    animation?.cancel(); starting=progress; dragging=true
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    return true
                 }
             }
         }
@@ -97,14 +127,26 @@ class ChatDrawer(context: Context) : FrameLayout(context) {
     }
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when(event.actionMasked) {
-            MotionEvent.ACTION_MOVE -> if(dragging) {
-                val progress=(starting+(event.x-downX)/panel.layoutParams.width).coerceIn(0f,1f)
-                panel.translationX=-(1-progress)*panel.layoutParams.width; shade.alpha=progress
+            MotionEvent.ACTION_MOVE -> {
+                val dx=event.x-downX
+                if(!dragging && abs(dx)>slop*2 && abs(dx)>abs(event.y-downY)*1.5f) {
+                    if(progress==0f) onOpening()
+                    animation?.cancel(); dragging=true
+                }
+                if(dragging) drawProgress(starting+dx/panel.layoutParams.width)
             }
-            MotionEvent.ACTION_UP -> { if(dragging) settle(starting+(event.x-downX)/panel.layoutParams.width > .25f) else if(outside) close(); performClick(); dragging=false }
+            MotionEvent.ACTION_UP -> {
+                if(dragging) {
+                    velocity?.computeCurrentVelocity(1000)
+                    val speed=velocity?.xVelocity ?: 0f
+                    settle(if(abs(speed)>minFling) speed>0 else progress>.5f,fromGesture=true)
+                } else if(outside) { haptic(); close(); performClick() }
+                dragging=false
+            }
             MotionEvent.ACTION_CANCEL -> { settle(isOpen); dragging=false }
         }
         return true
     }
+    override fun onDetachedFromWindow() { animation?.cancel(); velocity?.recycle(); velocity=null; super.onDetachedFromWindow() }
     override fun performClick(): Boolean { super.performClick(); return true }
 }

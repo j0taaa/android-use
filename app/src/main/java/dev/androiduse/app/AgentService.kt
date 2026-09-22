@@ -127,6 +127,7 @@ class AgentService : Service() {
                 val call = reply.calls.single()
                 checkpoint()
                 s.pending = obj("id" to call.id, "tool" to call.name, "args" to call.args, "state" to "dispatch_not_yet_confirmed")
+                val interaction = if (call.name !in setOf("finish", "ask_user")) s.startInteraction(call) else -1
                 Stores.saveSession(s) // Durable intent before any external effect.
                 val result: ToolOutput
                 try {
@@ -154,15 +155,19 @@ class AgentService : Service() {
                                 screenshots++
                             }
                             refresh("${call.name.replace('_', ' ')} · step $turn")
-                            s.log("tool", "${call.name} ${describe(call)}")
                             checkpoint()
                             result = phone.execute(call.name, call.args) { stopped.get() }
                         }
                     }
+                    val observationError = result.json.optString("observation_error")
+                    val actionFailed = result.json.has("error") || (result.json.has("action_completed") && !result.json.optBoolean("action_completed"))
+                    s.finishInteraction(interaction, if (actionFailed) "error" else if (observationError.isNotBlank()) "unknown" else "done",
+                        when { actionFailed -> result.json.optString("error", "Action did not complete."); observationError.isNotBlank() -> "Action completed; screen verification unavailable: $observationError"; else -> "Tool completed." })
                     failures = 0
                 } catch (e: InterruptedException) { throw e } catch (e: Exception) {
                     failures++
                     val reason = e.message?.take(350) ?: "Phone action failed."
+                    s.finishInteraction(interaction, "error", reason)
                     s.log("error", reason)
                     s.conversation.addResult(call, ToolOutput(obj("error" to reason)))
                     s.pending = null; Stores.saveSession(s)
@@ -183,14 +188,8 @@ class AgentService : Service() {
             stopSelf(); AppState.changed()
         }
     }
-    private fun describe(call: ToolCall): String = when (call.name) {
-        "open_app" -> call.args.optString("package_name")
-        "set_text" -> "→ ${call.args.optString("node_id")} (${call.args.optString("text").length} characters)"
-        "tap", "long_press", "scroll" -> "→ ${call.args.optString("node_id", "coordinates")}" 
-        "navigate" -> call.args.optString("action")
-        else -> ""
-    }
     private fun end(s: Session, status: String, summary: String) {
+        s.interruptInteractions()
         s.status = status; s.summary = summary; s.log("result", summary)
         try { Stores.saveSession(s) } catch (_: Exception) { s.log("error", "Could not save task history.") }
     }

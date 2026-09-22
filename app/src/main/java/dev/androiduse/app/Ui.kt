@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.view.HapticFeedbackConstants
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -22,6 +23,7 @@ object Palette {
     val warning = Color.rgb(138,87,18)
     val error = Color.rgb(179,38,30)
 }
+fun View.haptic() { performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
 fun Context.dp(v: Int) = (resources.displayMetrics.density * v).toInt()
 fun background(color: Int, radius: Float = 18f, border: Int? = null): GradientDrawable = GradientDrawable().apply {
     setColor(color); cornerRadius = radius; border?.let { setStroke(1, it) }
@@ -39,7 +41,7 @@ fun Context.action(text: String, primary: Boolean = false, click: () -> Unit): B
     this.text = text; isAllCaps = false; textSize = 15f; minHeight = dp(48)
     setTextColor(if (primary) Palette.dark else Palette.accent)
     background = background(if (primary) Palette.accent else Palette.surface, dp(14).toFloat(), if (primary) null else Palette.border)
-    setPadding(dp(16), dp(10), dp(16), dp(10)); setOnClickListener { click() }
+    setPadding(dp(16), dp(10), dp(16), dp(10)); setOnClickListener { haptic(); click() }
 }
 
 class ControlOverlay(private val service: PhoneAccessibilityService) {
