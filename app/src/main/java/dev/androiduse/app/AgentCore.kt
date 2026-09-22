@@ -96,6 +96,26 @@ class Conversation(val provider: String, val messages: JSONArray = JSONArray()) 
             }
         }
     }
+    fun closeInterruptedCalls() {
+        val outstanding = linkedMapOf<String, ToolCall>()
+        messages.objects().forEach { message ->
+            if (provider == "anthropic") {
+                message.optJSONArray("content")?.objects()?.forEach { block ->
+                    when (block.optString("type")) {
+                        "tool_use" -> outstanding[block.getString("id")] = ToolCall(block.getString("id"), block.getString("name"), block.getJSONObject("input"))
+                        "tool_result" -> outstanding.remove(block.getString("tool_use_id"))
+                    }
+                }
+            } else {
+                message.optJSONArray("tool_calls")?.objects()?.forEach { call ->
+                    val f = call.getJSONObject("function")
+                    outstanding[call.getString("id")] = ToolCall(call.getString("id"), f.getString("name"), JSONObject(f.getString("arguments")))
+                }
+                if (message.optString("role") == "tool") outstanding.remove(message.optString("tool_call_id"))
+            }
+        }
+        outstanding.values.forEach { addResult(it, ToolOutput(obj("error" to "Previous run interrupted; action outcome is unknown. This call was not replayed. Inspect the current phone state before taking any further action."))) }
+    }
     fun request(config: ProviderConfig): JSONObject {
         val copy = JSONArray(messages.toString())
         return if (provider == "anthropic") {

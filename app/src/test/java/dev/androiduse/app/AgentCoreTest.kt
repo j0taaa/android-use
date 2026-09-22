@@ -81,4 +81,21 @@ class AgentCoreTest {
         try { ProviderClient.parse("openai", obj("choices" to arr(obj("finish_reason" to "length", "message" to obj("content" to "partial"))))); fail() }
         catch(_: IllegalArgumentException) {}
     }
+    @Test fun `interrupted calls are resolved once without changing the cached prefix`() {
+        for (provider in listOf("openai", "anthropic")) {
+            val c = Conversation(provider); c.addUser("Save a note")
+            val response = reply(provider); c.addAssistant(response)
+            val before = JSONArray(c.messages.toString())
+            c.closeInterruptedCalls()
+            assertEquals(before.length()+1,c.messages.length())
+            for (i in 0 until before.length()) assertEquals(before.get(i).toString(),c.messages.get(i).toString())
+            assertTrue(c.messages.getJSONObject(c.messages.length()-1).toString().contains("not replayed"))
+            val resolved=c.messages.toString()
+            c.closeInterruptedCalls()
+            assertEquals(resolved,c.messages.toString())
+            c.addUser("Continue after checking the screen")
+            assertEquals(before.length()+2,c.messages.length())
+        }
+    }
+
 }

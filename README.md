@@ -1,17 +1,27 @@
 # Android Use
 
-[Download the signed v0.1.0 APK](https://android-use.jaypussy.site/android-use-0.1.0.apk) · [Installation page](https://android-use.jaypussy.site) · [Checksum](https://android-use.jaypussy.site/SHA256SUMS.txt)
+[Download the signed v0.2.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.2.0/android-use-0.2.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
 
-The download was fetched over HTTPS and verified against the local signed APK. Hosting requires this PC and its hosting connection to remain online.
+GitHub release downloads do not depend on a development computer. The installation-page mirror requires its hosting PC to stay online.
 
 A standalone Android phone agent. The agent loop and accessibility tools run on the phone; inference goes directly to the model API you configure. No ADB, root, computer, JavaScript development server, or Android Use backend is needed after installation.
 
 This is an early usable release, not a claim of reliable automation in every app. It includes OpenAI-compatible and Anthropic providers, structured screen observations, screenshots, semantic taps, coordinate gestures, text entry, app launching, navigation, a native foreground service, Pause/Stop controls, and encrypted local task history.
 
+## Chat interface
+
+Open directly to a new chat. Send a message from the bottom composer, swipe right (or tap the menu) to find earlier conversations, and open Settings from the drawer. Messages remain visible as a conversation; detailed phone actions and token usage are available under **View activity**.
+
+<img src="docs/screenshots/new-chat.png" width="240" alt="Light new chat screen"> <img src="docs/screenshots/conversation.png" width="240" alt="User and assistant messages"> <img src="docs/screenshots/chat-drawer.png" width="240" alt="Conversation history and Settings drawer">
+
+Screenshots show sample conversation data.
+
+You can send follow-up messages in chats created with v0.2. The app reloads the encrypted provider transcript and appends new messages without rewriting earlier context. Keep the same provider, endpoint and model for that chat. Older v0.1 history remains readable; start a new chat for replies.
+
 ## Install and use
 
 1. Install the signed APK on an Android 11+ phone.
-2. Open **Settings** in Android Use. Choose a provider, API base URL, model ID, and your API key. The default is OpenAI-compatible, `https://api.openai.com/v1`, `gpt-4.1-mini`. Use a model supporting function calls; image input is needed for screenshots. Anthropic defaults to `https://api.anthropic.com/v1`, `claude-sonnet-4-6`.
+2. Swipe right or tap the menu, then open **Settings**. Choose a provider, API base URL, model ID, and your API key. The default is OpenAI-compatible, `https://api.openai.com/v1`, `gpt-4.1-mini`. Use a model supporting function calls; image input is needed for screenshots. Anthropic defaults to `https://api.anthropic.com/v1`, `claude-sonnet-4-6`.
 3. Save the connection. **Test connection** sends one small billable model request.
 4. Read the phone-control disclosure and enable **Android Use phone control** in Android Accessibility settings. If Android blocks a sideloaded accessibility service, use the app's system **App info → ⋮ → Allow restricted settings**, then return to Accessibility.
 5. Keep the phone unlocked. Start with “Open Android Use practice and save a note saying Hello from my phone.” The practice activity is a real notepad UI that changes in response to accessibility actions.
@@ -27,9 +37,9 @@ The agent is implemented in Kotlin rather than Pi. The original research plan co
 - Conversation messages are appended. Existing screen observations, assistant calls, tool results, and image blocks are never regenerated or moved.
 - OpenAI requests use a stable `prompt_cache_key` on the official endpoint. Compatible endpoints receive standard Chat Completions requests without OpenAI-specific cache settings.
 - Anthropic requests enable automatic ephemeral prompt caching through top-level `cache_control`.
-- Screenshots are opt-in in settings, requested as a tool, and limited to five per task. Text observations are bounded to 160 visible meaningful nodes.
-- Task history shows **provider-reported** input, output, cache-read, and cache-write tokens. Input limits include cached tokens and are checked between requests; one request can cross the budget.
-- Default limits are 24 model turns, 100,000 cumulative input tokens, a 15-minute run deadline checked between turns, and 6 MB of serialized conversation. There is no hidden automatic context rewriting. Start a new task when a limit is reached.
+- Screenshots can be disabled in settings, are requested as a tool, and limited to five per message. Text observations are bounded to 160 visible meaningful nodes.
+- **View activity** shows **provider-reported** input, output, cache-read, and cache-write tokens. Input limits include cached tokens and are checked between requests; one request can cross the budget.
+- Default limits are 24 model turns per user message, 100,000 cumulative input tokens per user message, a 15-minute run deadline checked between turns, and 6 MB of serialized conversation. There is no hidden automatic context rewriting. Send a follow-up to continue within a new run budget; start a new chat if the conversation reaches the context-size limit.
 
 Cache hits are determined by the provider, selected model, prefix length, expiry, and routing. Stable requests enable reuse but cannot guarantee it. This repository tests prefix preservation; it does not claim measured live-provider savings.
 
@@ -41,14 +51,14 @@ References: [OpenAI prompt caching](https://developers.openai.com/api/docs/guide
 - `AgentService.kt`: native foreground run owner, sequential execution, pause/question/stop states, budgets and durable action journal.
 - `PhoneAccessibilityService.kt`: window observations, unique references per snapshot, target revalidation, gestures, screenshots and Android actions.
 - `Storage.kt`: Android Keystore AES-GCM encryption for API credentials and complete session files; atomic file replacement for journal writes.
-- `MainActivity.kt`, `Ui.kt`: native setup, composer, activity history, settings and accessibility overlay.
+- `MainActivity.kt`, `ChatViews.kt`, `Ui.kt`: native light chat, keyboard-aware composer, swipe drawer, settings and accessibility overlay.
 - `PracticeActivity.kt`: harmless UI for manual and automated phone-control tests.
 
 Accessibility performs the phone operations. The model only proposes tool calls; there is no remote execution server. A provider interface can later wrap native on-device inference without changing the tools.
 
 Nodes are scoped to a screen snapshot, with fresh-tree validation before actions. Only one tool call is accepted per model response. Multi-call batches are rejected without executing any member. An observed action result is distinct from the model's task-completion judgment.
 
-The app persists action intent before dispatch. Android process death can leave the external effect uncertain; the next launch marks that session **INTERRUPTED** and does not replay it. There is no automatic continuation after process death in v0.1. Review the last action before starting another task.
+The app persists action intent before dispatch. Android process death can leave the external effect uncertain; the next launch marks that session **INTERRUPTED** and does not replay it. There is no automatic continuation after process death. On an explicit follow-up, any unresolved tool call gets an interruption result, followed by a fresh observation. The previous action is never replayed automatically.
 
 ## Privacy and limits
 
@@ -83,7 +93,7 @@ keyPassword=YOUR_PRIVATE_PASSWORD
 ./gradlew :app:assembleRelease
 ```
 
-Keep the signing key safe: future updates must use the same key. The key created for this workspace is stored outside the project under `~/.local/share/android-use-signing/`, with private file permissions. Neither that directory nor `signing.properties` is published.
+Keep the signing key safe: future updates must use the same key. Signing credentials and generated artifacts are excluded from the repository.
 
 ## Emulator and tests
 
@@ -102,7 +112,7 @@ Add `-no-window -no-audio` for headless use. Hardware acceleration uses `/dev/kv
 ./gradlew -PtestBuildType=release :app:testReleaseUnitTest :app:connectedReleaseAndroidTest :app:lintRelease
 ```
 
-Instrumented tests enable accessibility on the emulator using the test harness, exercise actual Android windows, and use a local scripted HTTP server for repeatable model responses. This server exists only in the test APK; it is not bundled into the app. The tests cover real controls, cross-app navigation, screenshot image payloads, stale-reference rejection, prefix preservation, cache usage parsing, encrypted credentials, cancellation, pause/resume, Anthropic question/reply behavior, and exclusion of the agent's own controls. See [docs/TESTING.md](docs/TESTING.md) for recorded results and limitations.
+Instrumented tests enable accessibility on the emulator using the test harness, exercise actual Android windows, and use a local scripted HTTP server for repeatable model responses. This server exists only in the test APK; it is not bundled into the app. The tests cover real controls, cross-app navigation, screenshot image payloads, stale-reference rejection, prefix preservation, cache usage parsing, encrypted credentials, cancellation, pause/resume, Anthropic question/reply behavior, exclusion of the agent's own controls, encrypted chat continuation, UI message sending, drawer navigation, rotation, and keyboard layout. See [docs/TESTING.md](docs/TESTING.md) for recorded results and limitations.
 
 ## Research
 

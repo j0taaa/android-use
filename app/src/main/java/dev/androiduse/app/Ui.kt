@@ -12,15 +12,15 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 object Palette {
-    val bg = Color.rgb(16,21,18)
-    val surface = Color.rgb(28,36,31)
-    val border = Color.rgb(52,65,56)
-    val ink = Color.rgb(241,245,238)
-    val muted = Color.rgb(160,177,163)
-    val accent = Color.rgb(165,243,196)
-    val dark = Color.rgb(18,46,30)
-    val warning = Color.rgb(249,198,141)
-    val error = Color.rgb(255,168,157)
+    val bg = Color.WHITE
+    val surface = Color.rgb(245,245,245)
+    val border = Color.rgb(228,228,228)
+    val ink = Color.rgb(28,28,28)
+    val muted = Color.rgb(110,110,110)
+    val accent = Color.rgb(28,28,28)
+    val dark = Color.WHITE
+    val warning = Color.rgb(138,87,18)
+    val error = Color.rgb(179,38,30)
 }
 fun Context.dp(v: Int) = (resources.displayMetrics.density * v).toInt()
 fun background(color: Int, radius: Float = 18f, border: Int? = null): GradientDrawable = GradientDrawable().apply {

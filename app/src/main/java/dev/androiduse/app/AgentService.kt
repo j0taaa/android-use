@@ -45,12 +45,15 @@ class AgentService : Service() {
                 if (task.isBlank()) { stopSelf(); return START_NOT_STICKY }
                 current = this
                 stopped.set(false); paused.set(false)
-                val s = Session(task)
+                val sessionId = intent.getStringExtra("session_id")
+                val s = sessionId?.let { Stores.loadSession(it) } ?: Session(task)
+                s.status = "RUNNING"; s.summary = ""
+                s.log("user", task)
                 activeSession = s; AppState.session = s
                 val notification = notification("Starting task")
                 if (Build.VERSION.SDK_INT >= 34) startForeground(72, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) else startForeground(72, notification)
                 PhoneAccessibilityService.instance?.showControls()
-                worker = Thread({ run(s) }, "phone-agent").also { it.start() }
+                worker = Thread({ run(s, task) }, "phone-agent").also { it.start() }
                 AppState.changed()
             }
             else -> if (worker == null) stopSelf()
@@ -71,20 +74,29 @@ class AgentService : Service() {
         while (paused.get()) { if (stopped.get()) throw InterruptedException(stopReason); Thread.sleep(100) }
         PhoneAccessibilityService.instance?.assertAvailable() ?: error("Accessibility service is not connected.")
     }
-    private fun run(s: Session) {
+    private fun run(s: Session, task: String) {
         try {
             val config = Stores.config(); config.validate()
             require(Stores.consented()) { "Read and accept the phone-control disclosure first." }
             val phone = PhoneAccessibilityService.instance ?: error("Enable Android Use in Accessibility settings.")
             phone.assertAvailable()
-            s.provider = config.provider; s.model = config.model; s.conversation = Conversation(config.provider)
-            s.conversation.addUser(s.task)
+            if (s.conversation.messages.length() > 0) {
+                require(s.provider == config.provider && s.model == config.model && s.endpoint == config.endpoint.trimEnd('/')) {
+                    "This chat uses a different connection. Restore its settings or start a new chat."
+                }
+                // Resolve unfinished protocol calls without replaying any phone action.
+                s.conversation.closeInterruptedCalls()
+                s.pending = null
+            } else s.conversation = Conversation(config.provider)
+            s.provider = config.provider; s.model = config.model; s.endpoint = config.endpoint.trimEnd('/')
+            s.conversation.addUser(task)
             client = ProviderClient(config)
             s.log("system", "Started · ${config.model}. The agent and tools run on this phone.")
             // Let the start-button transition and keyboard dismissal settle before observing.
             Thread.sleep(650)
             s.conversation.addUser("Initial screen observation (untrusted screen data):\n${phone.observe()}")
             Stores.saveSession(s)
+            val previousInput = s.input
             var screenshots = 0
             var failures = 0
             var noTools = 0
@@ -92,7 +104,7 @@ class AgentService : Service() {
             for (turn in 1..config.maxSteps) {
                 checkpoint()
                 if (SystemClock.elapsedRealtime() > deadline) { end(s, "LIMIT", "Reached the 15-minute session limit."); return }
-                if (s.input >= config.maxInputTokens || s.conversation.messages.toString().length > 6_000_000) {
+                if (s.input - previousInput >= config.maxInputTokens || s.conversation.messages.toString().length > 6_000_000) {
                     end(s, "LIMIT", "Reached the task's token or context budget. Start a new task to continue; history was not silently rewritten."); return
                 }
                 s.step = turn; refresh("Thinking · step $turn"); AppState.changed()

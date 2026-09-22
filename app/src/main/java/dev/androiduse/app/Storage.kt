@@ -23,7 +23,8 @@ class UseApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Stores.init(this)
-        Stores.sessions().firstOrNull()?.let {
+        Stores.sessions().firstOrNull()?.let { previous ->
+            val it = if (previous.status in setOf("RUNNING", "PAUSED", "WAITING")) Stores.loadSession(previous.id) ?: previous else previous
             if (it.status in setOf("RUNNING", "PAUSED", "WAITING")) {
                 it.status = "INTERRUPTED"
                 it.summary = "Android stopped the previous process. Review its last action before starting a new task."
@@ -67,22 +68,23 @@ class Session(val task: String, val id: String = UUID.randomUUID().toString(), v
     @Volatile var cacheWrite = 0
     var provider = ""
     var model = ""
+    var endpoint = ""
     var pending: JSONObject? = null
     var conversation = Conversation("openai")
     val events = CopyOnWriteArrayList<RunEvent>()
-    fun log(kind: String, text: String) { events.add(RunEvent(kind, text.take(3000))); AppState.changed() }
+    fun log(kind: String, text: String) { events.add(RunEvent(kind, text.take(if (kind in setOf("user", "agent", "question", "result")) 16000 else 3000))); AppState.changed() }
     fun json() = obj("id" to id, "task" to task, "started" to started, "status" to status, "summary" to summary,
         "step" to step, "input" to input, "cached" to cached, "output" to output, "cacheWrite" to cacheWrite,
-        "provider" to provider, "model" to model, "pending" to pending, "messages" to conversation.messages,
+        "provider" to provider, "model" to model, "endpoint" to endpoint, "pending" to pending, "messages" to conversation.messages,
         "events" to JSONArray().also { a -> events.forEach { a.put(obj("kind" to it.kind, "text" to it.text, "time" to it.time)) } })
     companion object {
-        fun from(j: JSONObject): Session = Session(j.getString("task"), j.getString("id"), j.getLong("started")).apply {
+        fun from(j: JSONObject, transcript: Boolean = false): Session = Session(j.getString("task"), j.getString("id"), j.getLong("started")).apply {
             status = j.getString("status"); summary = j.optString("summary"); step = j.optInt("step")
             input = j.optInt("input"); cached = j.optInt("cached"); output = j.optInt("output"); cacheWrite = j.optInt("cacheWrite")
-            provider = j.optString("provider"); model = j.optString("model"); pending = j.optJSONObject("pending")
-            // History never resumes old inference automatically; do not retain image payloads
+            provider = j.optString("provider"); model = j.optString("model"); endpoint = j.optString("endpoint"); pending = j.optJSONObject("pending")
+            // Loading history does not resume inference or retain all image payloads
             // from up to 40 old transcripts in the UI heap. The encrypted journal stays on disk.
-            conversation = Conversation(provider)
+            conversation = Conversation(provider, if (transcript) j.optJSONArray("messages") ?: JSONArray() else JSONArray())
             j.optJSONArray("events")?.objects()?.forEach { events.add(RunEvent(it.getString("kind"), it.getString("text"), it.getLong("time"))) }
         }
     }
@@ -124,5 +126,12 @@ object Stores {
     @Synchronized fun sessions(): List<Session> = folder().listFiles()?.filter { it.name.endsWith(".enc") }?.sortedByDescending { it.lastModified() }?.mapNotNull {
         try { Session.from(JSONObject(Vault.decrypt(AtomicFile(it).readFully().toString(Charsets.UTF_8)))) } catch (_: Exception) { null }
     } ?: emptyList()
+    @Synchronized fun loadSession(id: String): Session? {
+        require(id.matches(Regex("[a-fA-F0-9-]{36}"))) { "Invalid conversation ID." }
+        return try {
+            val bytes = AtomicFile(File(folder(), "$id.json.enc")).readFully()
+            Session.from(JSONObject(Vault.decrypt(bytes.toString(Charsets.UTF_8))), transcript = true)
+        } catch (_: Exception) { null }
+    }
     fun clearHistory() { check(AgentService.current == null) { "Stop the active task first." }; folder().listFiles()?.forEach { it.delete() }; AppState.session = null; AppState.changed() }
 }

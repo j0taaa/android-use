@@ -29,6 +29,13 @@ class PhoneIntegrationTest {
         assertTrue("Condition timed out", condition())
     }
     @Before fun setup() {
+        androidx.test.uiautomator.Configurator.getInstance().uiAutomationFlags = UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES
+        // A prior instrumentation process can leave an enabled service marked crashed.
+        // Toggle its test-only grant so Android actually binds this process again.
+        if (PhoneAccessibilityService.instance == null) {
+            shell("settings delete secure enabled_accessibility_services")
+            Thread.sleep(250)
+        }
         shell("settings put secure enabled_accessibility_services ${context.packageName}/dev.androiduse.app.PhoneAccessibilityService")
         shell("settings put secure accessibility_enabled 1")
         shell("settings put system screen_off_timeout 1800000")
@@ -202,6 +209,114 @@ class PhoneIntegrationTest {
         assertEquals(0,screen.getJSONArray("nodes").length())
         try { phone.screenshot(); fail("Captured the agent controls") } catch(_:IllegalArgumentException) {}
         try { call("tap",obj("snapshot_id" to screen.getString("snapshot_id"),"x" to 100,"y" to 300)); fail("Tapped agent controls") } catch(_:Exception) {}
+    }
+
+    @Test fun followUpReloadsEncryptedTranscriptAndPreservesRequestPrefix() {
+        MockWebServer().use { server ->
+            server.enqueue(response(0,"finish",obj("summary" to "First reply", "success" to true)))
+            server.enqueue(response(1,"finish",obj("summary" to "Follow-up reply", "success" to true)))
+            val config=ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="test",model="chat-test")
+            Stores.saveConfig(config)
+            inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","First message")) }
+            waitUntil { AppState.session?.task=="First message" && AppState.session?.status=="COMPLETE" && AgentService.current==null }
+            val id=AppState.session!!.id
+            val saved=Stores.loadSession(id)!!
+            val before=saved.conversation.request(config).getJSONArray("messages")
+            assertTrue(before.length()>3)
+            assertEquals(config.endpoint,saved.endpoint)
+            AppState.session=null // Mimic an unloaded transcript; continuation must read disk.
+            inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Follow-up message").putExtra("session_id",id)) }
+            waitUntil { AppState.session?.id==id && AppState.session?.summary=="Follow-up reply" && AgentService.current==null }
+            server.takeRequest(5,TimeUnit.SECONDS)
+            val request=JSONObject(server.takeRequest(5,TimeUnit.SECONDS)!!.body.readUtf8())
+            val after=request.getJSONArray("messages")
+            for(i in 0 until before.length()) assertEquals("Changed history at $i",before.get(i).toString(),after.get(i).toString())
+            assertEquals("Follow-up message",after.getJSONObject(before.length()).getString("content"))
+            assertEquals(listOf("First message","Follow-up message"),Stores.loadSession(id)!!.events.filter { it.kind=="user" }.map { it.text })
+            assertEquals(1,Stores.sessions().count { it.id==id })
+        }
+    }
+
+    @Test fun chatStartsBlankSwipeOpensHistoryAndSettingsAndDraftSurvivesRotation() {
+        val device=androidx.test.uiautomator.UiDevice.getInstance(inst)
+        fun find(selector: androidx.test.uiautomator.BySelector): androidx.test.uiautomator.UiObject2 {
+            return device.wait(androidx.test.uiautomator.Until.findObject(selector),7000) ?: error("Missing UI element: $selector")
+        }
+        Stores.clearHistory()
+        val fixture=Session("Save a shopping list").apply {
+            status="COMPLETE"; provider="openai"; model="gpt-4.1-mini"; endpoint="https://api.openai.com/v1"
+            log("user",task); log("result","Saved your shopping list with milk, coffee, and bread.")
+            log("user","Add apples to the list too")
+            log("result","Added apples to your shopping list.")
+            conversation.addUser(task)
+        }
+        Stores.saveSession(fixture)
+        inst.startActivitySync(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        inst.waitForIdleSync(); device.waitForIdle()
+        find(androidx.test.uiautomator.By.text("How can I help?"))
+        assertFalse(device.hasObject(androidx.test.uiautomator.By.text(fixture.task)))
+        device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"new-chat.png"))
+        device.swipe(device.displayWidth/5,device.displayHeight/2,device.displayWidth*4/5,device.displayHeight/2,25)
+        find(androidx.test.uiautomator.By.text("Chats"))
+        device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"chat-drawer.png"))
+        find(androidx.test.uiautomator.By.text(fixture.task)).click()
+        find(androidx.test.uiautomator.By.text("Added apples to your shopping list."))
+        device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"conversation.png"))
+        find(androidx.test.uiautomator.By.desc("New chat")).click()
+        find(androidx.test.uiautomator.By.text("How can I help?"))
+        find(androidx.test.uiautomator.By.desc("Message")).text="Keep this draft"
+        device.setOrientationLeft()
+        find(androidx.test.uiautomator.By.text("Keep this draft"))
+        device.setOrientationNatural()
+        find(androidx.test.uiautomator.By.text("Keep this draft"))
+        find(androidx.test.uiautomator.By.desc("Open chat history")).click()
+        find(androidx.test.uiautomator.By.desc("Open settings")).click()
+        find(androidx.test.uiautomator.By.text("API key"))
+        device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"chat-settings.png"))
+        find(androidx.test.uiautomator.By.desc("Back to chat")).click()
+        find(androidx.test.uiautomator.By.text("Keep this draft"))
+        device.unfreezeRotation()
+    }
+
+    @Test fun composerSendsNewAndFollowUpMessagesAndKeepsKeyboardClear() {
+        val device=androidx.test.uiautomator.UiDevice.getInstance(inst)
+        fun find(selector: androidx.test.uiautomator.BySelector): androidx.test.uiautomator.UiObject2 =
+            device.wait(androidx.test.uiautomator.Until.findObject(selector),7000) ?: error("Missing $selector")
+        MockWebServer().use { server ->
+            server.enqueue(response(0,"finish",obj("summary" to "Ready to help with your phone.","success" to true)))
+            server.enqueue(response(1,"finish",obj("summary" to "I still have our conversation.","success" to true)))
+            Stores.saveConfig(ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="ui-test",model="chat-test"))
+            if(android.os.Build.VERSION.SDK_INT>=33) shell("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
+            inst.startActivitySync(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        inst.waitForIdleSync(); device.waitForIdle()
+            find(androidx.test.uiautomator.By.desc("Message")).click()
+            find(androidx.test.uiautomator.By.desc("Message")).text="Hello from my phone"
+            find(androidx.test.uiautomator.By.text("Hello from my phone"))
+            device.waitForIdle()
+            device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"chat-keyboard.png"))
+            val button=find(androidx.test.uiautomator.By.desc("Send message"))
+            assertTrue("Composer should resize above keyboard",button.visibleBounds.bottom<device.displayHeight*3/4)
+            button.click()
+            try { waitUntil { AgentService.current==null && AppState.session?.summary=="Ready to help with your phone." } }
+            catch(e: AssertionError) {
+                device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"send-failure.png"))
+                throw AssertionError("Send failed: ${AppState.session?.status}: ${AppState.session?.summary}; requests=${server.requestCount}", e)
+            }
+            find(androidx.test.uiautomator.By.text("Ready to help with your phone."))
+            find(androidx.test.uiautomator.By.text("Hello from my phone"))
+            val id=AppState.session!!.id
+            find(androidx.test.uiautomator.By.desc("Message")).text="Do you remember this chat?"
+            find(androidx.test.uiautomator.By.desc("Send message")).click()
+            waitUntil { AgentService.current==null && AppState.session?.summary=="I still have our conversation." }
+            assertEquals(id,AppState.session!!.id)
+            find(androidx.test.uiautomator.By.text("I still have our conversation."))
+            assertEquals(2,server.requestCount)
+            find(androidx.test.uiautomator.By.desc("Open chat history")).click()
+            find(androidx.test.uiautomator.By.text("Chats"))
+            device.pressBack()
+            find(androidx.test.uiautomator.By.desc("Open chat history"))
+            find(androidx.test.uiautomator.By.text("I still have our conversation."))
+        }
     }
 
 }
