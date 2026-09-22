@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Android Use</string>
+    <string name="accessibility_description">Android Use reads the screen and performs taps, text entry, scrolling, and navigation only during tasks you start. Screen content and requested screenshots are sent to your selected AI provider. Stop a task at any time from the floating control or notification.</string>
+</resources>

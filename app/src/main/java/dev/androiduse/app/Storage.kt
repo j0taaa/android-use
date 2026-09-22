@@ -1,0 +1,128 @@
+package dev.androiduse.app
+
+import android.app.Application
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.AtomicFile
+import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.security.KeyStore
+import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+class UseApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        Stores.init(this)
+        Stores.sessions().firstOrNull()?.let {
+            if (it.status in setOf("RUNNING", "PAUSED", "WAITING")) {
+                it.status = "INTERRUPTED"
+                it.summary = "Android stopped the previous process. Review its last action before starting a new task."
+                it.log("system", it.summary)
+                Stores.saveSession(it)
+            }
+            AppState.session = it
+        }
+    }
+}
+
+object Vault {
+    private const val ALIAS = "android-use-local-v1"
+    @Synchronized private fun key(): SecretKey {
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (ks.getKey(ALIAS, null) as? SecretKey)?.let { return it }
+        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+            init(KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
+        }.generateKey()
+    }
+    fun encrypt(text: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
+        return Base64.encodeToString(cipher.iv + cipher.doFinal(text.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+    }
+    fun decrypt(text: String): String {
+        val bytes = Base64.decode(text, Base64.NO_WRAP)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12))) }
+        return String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8)
+    }
+}
+
+data class RunEvent(val kind: String, val text: String, val time: Long = System.currentTimeMillis())
+class Session(val task: String, val id: String = UUID.randomUUID().toString(), val started: Long = System.currentTimeMillis()) {
+    @Volatile var status = "RUNNING"
+    @Volatile var summary = ""
+    @Volatile var step = 0
+    @Volatile var input = 0
+    @Volatile var cached = 0
+    @Volatile var output = 0
+    @Volatile var cacheWrite = 0
+    var provider = ""
+    var model = ""
+    var pending: JSONObject? = null
+    var conversation = Conversation("openai")
+    val events = CopyOnWriteArrayList<RunEvent>()
+    fun log(kind: String, text: String) { events.add(RunEvent(kind, text.take(3000))); AppState.changed() }
+    fun json() = obj("id" to id, "task" to task, "started" to started, "status" to status, "summary" to summary,
+        "step" to step, "input" to input, "cached" to cached, "output" to output, "cacheWrite" to cacheWrite,
+        "provider" to provider, "model" to model, "pending" to pending, "messages" to conversation.messages,
+        "events" to JSONArray().also { a -> events.forEach { a.put(obj("kind" to it.kind, "text" to it.text, "time" to it.time)) } })
+    companion object {
+        fun from(j: JSONObject): Session = Session(j.getString("task"), j.getString("id"), j.getLong("started")).apply {
+            status = j.getString("status"); summary = j.optString("summary"); step = j.optInt("step")
+            input = j.optInt("input"); cached = j.optInt("cached"); output = j.optInt("output"); cacheWrite = j.optInt("cacheWrite")
+            provider = j.optString("provider"); model = j.optString("model"); pending = j.optJSONObject("pending")
+            // History never resumes old inference automatically; do not retain image payloads
+            // from up to 40 old transcripts in the UI heap. The encrypted journal stays on disk.
+            conversation = Conversation(provider)
+            j.optJSONArray("events")?.objects()?.forEach { events.add(RunEvent(it.getString("kind"), it.getString("text"), it.getLong("time"))) }
+        }
+    }
+}
+
+object AppState {
+    @Volatile var session: Session? = null
+    val listeners = CopyOnWriteArrayList<() -> Unit>()
+    private val main = Handler(Looper.getMainLooper())
+    fun changed() { main.post { listeners.forEach { it() } } }
+}
+
+object Stores {
+    private lateinit var context: Context
+    fun init(ctx: Context) { context = ctx.applicationContext }
+    private val prefs get() = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    fun config(): ProviderConfig = ProviderConfig(
+        prefs.getString("provider", "openai")!!, prefs.getString("endpoint", "https://api.openai.com/v1")!!,
+        prefs.getString("model", "gpt-4.1-mini")!!,
+        prefs.getString("credential", null)?.let { try { Vault.decrypt(it) } catch (_: Exception) { "" } } ?: "",
+        prefs.getInt("steps", 24), prefs.getInt("tokens", 100000), prefs.getBoolean("screenshots", true))
+    fun saveConfig(c: ProviderConfig) {
+        c.validate()
+        check(prefs.edit().putString("provider", c.provider).putString("endpoint", c.endpoint.trimEnd('/')).putString("model", c.model)
+            .putString("credential", Vault.encrypt(c.apiKey)).putInt("steps", c.maxSteps).putInt("tokens", c.maxInputTokens)
+            .putBoolean("screenshots", c.allowScreenshots).commit()) { "Could not save settings." }
+    }
+    fun consented() = prefs.getBoolean("disclosure", false)
+    fun consent() { prefs.edit().putBoolean("disclosure", true).apply() }
+    fun removeKey() { prefs.edit().remove("credential").commit() }
+    private fun folder() = File(context.filesDir, "sessions").apply { mkdirs() }
+    @Synchronized fun saveSession(s: Session) {
+        val file = AtomicFile(File(folder(), "${s.id}.json.enc"))
+        val bytes = Vault.encrypt(s.json().toString()).toByteArray()
+        val out = file.startWrite()
+        try { out.write(bytes); file.finishWrite(out) } catch (e: Exception) { file.failWrite(out); throw e }
+        folder().listFiles()?.filter { it.name.endsWith(".enc") }?.sortedByDescending { it.lastModified() }?.drop(40)?.forEach { it.delete() }
+    }
+    @Synchronized fun sessions(): List<Session> = folder().listFiles()?.filter { it.name.endsWith(".enc") }?.sortedByDescending { it.lastModified() }?.mapNotNull {
+        try { Session.from(JSONObject(Vault.decrypt(AtomicFile(it).readFully().toString(Charsets.UTF_8)))) } catch (_: Exception) { null }
+    } ?: emptyList()
+    fun clearHistory() { check(AgentService.current == null) { "Stop the active task first." }; folder().listFiles()?.forEach { it.delete() }; AppState.session = null; AppState.changed() }
+}
