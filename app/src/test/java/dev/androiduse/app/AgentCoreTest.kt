@@ -12,6 +12,33 @@ class AgentCoreTest {
         ProviderClient.parse(provider, obj("content" to arr(obj("type" to "tool_use", "id" to "call-1", "name" to "observe", "input" to obj())), "usage" to obj("input_tokens" to 20, "cache_read_input_tokens" to 100, "cache_creation_input_tokens" to 30, "output_tokens" to 10)))
     else ProviderClient.parse(provider, obj("choices" to arr(obj("message" to obj("role" to "assistant", "content" to null, "tool_calls" to arr(obj("id" to "call-1", "type" to "function", "function" to obj("name" to "observe", "arguments" to "{}")))), "finish_reason" to "tool_calls")), "usage" to obj("prompt_tokens" to 150, "prompt_tokens_details" to obj("cached_tokens" to 100), "completion_tokens" to 10)))
 
+    @Test fun `attachments use native provider blocks and survive followups unchanged`() {
+        val attachments=listOf(
+            AttachmentInput(Attachment("image","photo.jpg","image/jpeg",3),"YWJj"),
+            AttachmentInput(Attachment("pdf","guide.pdf","application/pdf",3),"ZGVm"),
+            AttachmentInput(Attachment("text","notes.txt","text/plain",5),"hello")
+        )
+        for(provider in listOf("openai","anthropic")) {
+            val c=Conversation(provider); c.addUser("",attachments)
+            val parts=c.messages.getJSONObject(0).getJSONArray("content")
+            val image=parts.getJSONObject(1)
+            val pdf=parts.getJSONObject(2)
+            if(provider=="openai") {
+                assertEquals("data:image/jpeg;base64,YWJj",image.getJSONObject("image_url").getString("url"))
+                assertEquals("data:application/pdf;base64,ZGVm",pdf.getJSONObject("file").getString("file_data"))
+                assertEquals("guide.pdf",pdf.getJSONObject("file").getString("filename"))
+            } else {
+                assertEquals("image",image.getString("type")); assertEquals("YWJj",image.getJSONObject("source").getString("data"))
+                assertEquals("document",pdf.getString("type")); assertEquals("application/pdf",pdf.getJSONObject("source").getString("media_type"))
+            }
+            assertTrue(parts.getJSONObject(3).getString("text").endsWith("hello"))
+            val prefix=c.messages.toString()
+            c.addUser("A follow-up")
+            assertEquals(JSONArray(prefix).get(0).toString(),c.messages.get(0).toString())
+            assertEquals(prefix,JSONArray().put(c.messages.get(0)).toString())
+        }
+    }
+
     @Test fun `previous messages tools and instructions remain identical as a task grows`() {
         for (provider in listOf("openai", "anthropic")) {
             val config = ProviderConfig(provider = provider)

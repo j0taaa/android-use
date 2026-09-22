@@ -50,7 +50,7 @@ class PhoneIntegrationTest {
         waitUntil { AgentService.current == null }
     }
     private fun launchPractice() {
-        inst.runOnMainSync { context.startActivity(Intent(context, PracticeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        inst.runOnMainSync { context.startActivity(Intent(context, PracticeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)) }
         waitUntil { try { phone.observe().getJSONArray("nodes").toString().contains("Your practice note") } catch(_: Exception) { false } }
         phone.settle()
     }
@@ -176,13 +176,23 @@ class PhoneIntegrationTest {
             assertEquals(1,server.requestCount)
             Thread.sleep(350)
             assertEquals(1,server.requestCount)
-            AgentService.current!!.reply("Use the title Meeting notes")
+            val replyPhoto=attachmentFixture("reply-photo.png","image/png",photoBytes())
+            val replyText=attachmentFixture("reply-notes.txt","text/plain","Meeting attachment content".toByteArray())
+            Attachments.importUris("reply-fixture",listOf(replyPhoto,replyText))
+            waitUntil { !Attachments.busy("reply-fixture") }
+            assertNull(Attachments.takeError("reply-fixture"))
+            AgentService.current!!.reply("Use the title Meeting notes",Attachments.ids("reply-fixture"))
+            Attachments.forgetDraft("reply-fixture")
+            context.contentResolver.delete(replyPhoto,null,null); context.contentResolver.delete(replyText,null,null)
             waitUntil { AppState.session?.status=="COMPLETE" }
             assertEquals(2,requests.size)
             assertEquals("ephemeral",requests[1].getJSONObject("cache_control").getString("type"))
             val first=requests[0].getJSONArray("messages"); val second=requests[1].getJSONArray("messages")
             for(i in 0 until first.length()) assertEquals(first.get(i).toString(),second.get(i).toString())
             assertTrue(second.toString().contains("Meeting notes"))
+            assertTrue(second.toString().contains("Meeting attachment content"))
+            assertTrue(second.objects().any { m -> m.optJSONArray("content")?.objects()?.any { it.optString("type")=="image" && it.getJSONObject("source").getString("media_type")=="image/jpeg" } == true })
+            assertEquals(2,Stores.loadSession(AppState.session!!.id)!!.events.last { it.kind=="user" }.attachments.size)
             assertEquals(4096,AppState.session!!.cached)
         }
     }
@@ -379,6 +389,149 @@ class PhoneIntegrationTest {
             find(androidx.test.uiautomator.By.desc("Open chat history"))
             assertFalse(device.hasObject(androidx.test.uiautomator.By.text("Chats")))
         }
+    }
+
+    private fun attachmentFixture(name: String, mime: String, bytes: ByteArray): android.net.Uri {
+        val values=android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME,name)
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE,mime)
+            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH,"Download/")
+            put(android.provider.MediaStore.MediaColumns.IS_PENDING,1)
+        }
+        val uri=context.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,values)!!
+        context.contentResolver.openOutputStream(uri)!!.use { it.write(bytes) }
+        context.contentResolver.update(uri,android.content.ContentValues().apply { put(android.provider.MediaStore.MediaColumns.IS_PENDING,0) },null,null)
+        return uri
+    }
+    private fun photoBytes(): ByteArray {
+        val bitmap=android.graphics.Bitmap.createBitmap(2400,1200,android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas=android.graphics.Canvas(bitmap)
+        canvas.drawColor(android.graphics.Color.rgb(222,235,243))
+        val paint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color=android.graphics.Color.rgb(39,63,78); textSize=100f }
+        canvas.drawText("Weekend itinerary",160f,400f,paint)
+        paint.textSize=60f; canvas.drawText("Saturday: explore the coast",160f,550f,paint)
+        return java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it); bitmap.recycle() }.toByteArray()
+    }
+    @Test fun attachmentPreparationBoundsEncryptionAndDocumentExtraction() {
+        Attachments.clear()
+        val fixtures=mutableListOf<android.net.Uri>()
+        fun file(name:String,mime:String,bytes:ByteArray)=attachmentFixture(name,mime,bytes).also { fixtures.add(it) }
+        try {
+            val photo=file("itinerary.png","image/png",photoBytes())
+            val image=Attachments.prepare(photo)
+            assertEquals("image/jpeg",image.attachment.mime)
+            val data=android.util.Base64.decode(image.data,0)
+            val bounds=android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds=true }
+            android.graphics.BitmapFactory.decodeByteArray(data,0,data.size,bounds)
+            assertEquals(1600,bounds.outWidth); assertEquals(800,bounds.outHeight)
+            assertTrue(image.attachment.thumbnail.isNotBlank())
+            val text=file("notes.txt","text/plain","Private packing checklist: passport".toByteArray())
+            Attachments.importUris("new",listOf(photo,text))
+            waitUntil { !Attachments.busy("new") }
+            assertNull(Attachments.takeError("new")); assertEquals(2,Attachments.ids("new").size)
+            val inputs=Attachments.load(Attachments.ids("new"))
+            assertEquals("Private packing checklist: passport",inputs[1].data)
+            java.io.File(context.filesDir,"attachments").listFiles()!!.forEach {
+                assertFalse(it.readText().contains("passport")); assertFalse(it.readText().contains("itinerary.png"))
+            }
+            val zip=java.io.ByteArrayOutputStream()
+            java.util.zip.ZipOutputStream(zip).use { z ->
+                z.putNextEntry(java.util.zip.ZipEntry("word/document.xml"))
+                z.write("<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Word attachment content</w:t></w:r></w:p></w:body></w:document>".toByteArray()); z.closeEntry()
+            }
+            val doc=Attachments.prepare(file("agenda.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document",zip.toByteArray()))
+            assertEquals("Word attachment content\n",doc.data)
+            val pdf=android.graphics.pdf.PdfDocument()
+            val page=pdf.startPage(android.graphics.pdf.PdfDocument.PageInfo.Builder(200,200,1).create())
+            page.canvas.drawText("PDF fixture",20f,50f,android.graphics.Paint()); pdf.finishPage(page)
+            val pdfBytes=java.io.ByteArrayOutputStream(); pdf.writeTo(pdfBytes); pdf.close()
+            assertEquals("application/pdf",Attachments.prepare(file("guide.pdf","application/pdf",pdfBytes.toByteArray())).attachment.mime)
+            for(uri in listOf(file("program.bin","application/octet-stream",byteArrayOf(0,1,2)),file("too-large.txt","text/plain",ByteArray(200001){65}),file("invalid.pdf","application/pdf","not a PDF".toByteArray()))) {
+                try { Attachments.prepare(uri); fail("Unsupported or oversized attachment accepted") } catch(_: IllegalArgumentException) {}
+            }
+            val id=Attachments.ids("new").first(); Attachments.remove("new",id)
+            assertEquals(1,Attachments.ids("new").size)
+            assertFalse(java.io.File(context.filesDir,"attachments/$id.data.enc").exists())
+            Attachments.importUris("limits",List(5) { text })
+            waitUntil { !Attachments.busy("limits") }
+            assertEquals(4,Attachments.ids("limits").size)
+            assertTrue(Attachments.takeError("limits")!!.contains("four"))
+            try { Attachments.load(Attachments.ids("limits")+Attachments.ids("limits").first()); fail("Accepted five attachments") } catch(_: IllegalArgumentException) {}
+        } finally { Attachments.clear(); fixtures.forEach { context.contentResolver.delete(it,null,null) } }
+    }
+
+    @Test fun documentPickerPreviewRemovalRotationAndImageOnlyChat() {
+        Stores.clearHistory()
+        val device=androidx.test.uiautomator.UiDevice.getInstance(inst)
+        fun find(selector: androidx.test.uiautomator.BySelector): androidx.test.uiautomator.UiObject2 =
+            device.wait(androidx.test.uiautomator.Until.findObject(selector),10000) ?: error("Missing $selector")
+        val photo=attachmentFixture("weekend-itinerary.png","image/png",photoBytes())
+        val notes=attachmentFixture("packing-checklist.txt","text/plain","Pack passport and sunglasses.".toByteArray())
+        fun choose(name:String, photos:Boolean=false) {
+            find(androidx.test.uiautomator.By.desc("Add attachments")).click()
+            find(androidx.test.uiautomator.By.text(if(photos) "Photos" else "Files")).click()
+            device.waitForIdle()
+            // Navigate through Android DocumentsUI, rather than injecting a picker result.
+            val roots=device.findObject(androidx.test.uiautomator.By.desc("Show roots"))
+            roots?.click()
+            device.waitForIdle()
+            val downloads=device.findObject(androidx.test.uiautomator.UiSelector().text("Downloads"))
+            if(downloads.waitForExists(2000)) downloads.click()
+            device.waitForIdle()
+            var document=device.findObject(androidx.test.uiautomator.UiSelector().text(name))
+            if(!document.waitForExists(2000)) document=device.findObject(androidx.test.uiautomator.UiSelector().descriptionContains(name))
+            if(!document.waitForExists(5000)) {
+                device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"picker-failure.png"))
+                device.dumpWindowHierarchy(java.io.File(context.getExternalFilesDir(null),"picker-failure.xml"))
+                fail("File missing from Android picker")
+            }
+            document.click()
+            find(androidx.test.uiautomator.By.desc("Remove $name"))
+            waitUntil { !Attachments.busy("new") }
+        }
+        try {
+            MockWebServer().use { server ->
+                server.enqueue(response(0,"finish",obj("summary" to "Your itinerary is ready to discuss.","success" to true)))
+                server.enqueue(response(1,"finish",obj("summary" to "I still have your itinerary.","success" to true)))
+                val conf=ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="attachment-test",model="vision-test")
+                Stores.saveConfig(conf)
+                inst.startActivitySync(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+                inst.waitForIdleSync(); device.waitForIdle()
+                choose("packing-checklist.txt")
+                find(androidx.test.uiautomator.By.desc("Remove packing-checklist.txt")).click()
+                waitUntil { Attachments.ids("new").isEmpty() }
+                choose("weekend-itinerary.png",photos=true)
+                device.setOrientationLeft(); device.waitForIdle(); device.setOrientationNatural(); device.waitForIdle()
+                find(androidx.test.uiautomator.By.desc("Remove weekend-itinerary.png"))
+                device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"attachment-composer.png"))
+                find(androidx.test.uiautomator.By.desc("Send message")).click()
+                waitUntil { AppState.session?.status=="COMPLETE" && AgentService.current==null }
+                val first=JSONObject(server.takeRequest(5,TimeUnit.SECONDS)!!.body.readUtf8())
+                val parts=first.getJSONArray("messages").getJSONObject(1).getJSONArray("content")
+                assertTrue(parts.getJSONObject(1).getJSONObject("image_url").getString("url").startsWith("data:image/jpeg;base64,"))
+                val session=Stores.loadSession(AppState.session!!.id)!!
+                assertEquals("weekend-itinerary.png",session.events.first { it.kind=="user" }.attachments.single().name)
+                assertEquals("",session.events.first { it.kind=="user" }.text)
+                assertTrue(Attachments.ids("new").isEmpty())
+                find(androidx.test.uiautomator.By.text("Your itinerary is ready to discuss."))
+                find(androidx.test.uiautomator.By.desc("Image: weekend-itinerary.png"))
+                device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"attachment-chat.png"))
+                val prefix=session.conversation.request(conf).getJSONArray("messages")
+                choose("packing-checklist.txt")
+                find(androidx.test.uiautomator.By.desc("New chat")).click()
+                find(androidx.test.uiautomator.By.text("How can I help?"))
+                assertFalse(device.hasObject(androidx.test.uiautomator.By.desc("Remove packing-checklist.txt")))
+                find(androidx.test.uiautomator.By.desc("Open chat history")).click()
+                find(androidx.test.uiautomator.By.text("weekend-itinerary.png")).click()
+                find(androidx.test.uiautomator.By.desc("Remove packing-checklist.txt"))
+                find(androidx.test.uiautomator.By.desc("Message")).text="What should I pack?"
+                find(androidx.test.uiautomator.By.desc("Send message")).click()
+                waitUntil { AppState.session?.summary=="I still have your itinerary." && AgentService.current==null }
+                val after=JSONObject(server.takeRequest(5,TimeUnit.SECONDS)!!.body.readUtf8()).getJSONArray("messages")
+                for(i in 0 until prefix.length()) assertEquals(prefix.get(i).toString(),after.get(i).toString())
+                assertTrue(after.toString().contains("Pack passport and sunglasses."))
+            }
+        } finally { device.unfreezeRotation(); context.contentResolver.delete(photo,null,null); context.contentResolver.delete(notes,null,null) }
     }
 
 }

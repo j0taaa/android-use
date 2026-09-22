@@ -23,7 +23,8 @@ class AgentService : Service() {
     }
     private val stopped = AtomicBoolean(false)
     private val paused = AtomicBoolean(false)
-    private val answer = AtomicReference<String?>(null)
+    private data class Answer(val text: String, val ids: List<String>)
+    private val answer = AtomicReference<Answer?>(null)
     private var worker: Thread? = null
     private var client: ProviderClient? = null
     private var activeSession: Session? = null
@@ -42,18 +43,19 @@ class AgentService : Service() {
             START -> {
                 if (worker?.isAlive == true) return START_NOT_STICKY
                 val task = intent.getStringExtra("task")?.trim().orEmpty()
-                if (task.isBlank()) { stopSelf(); return START_NOT_STICKY }
+                val ids = intent.getStringArrayListExtra("attachments")?.toList() ?: emptyList()
+                if (task.isBlank() && ids.isEmpty()) { stopSelf(); return START_NOT_STICKY }
                 current = this
                 stopped.set(false); paused.set(false)
                 val sessionId = intent.getStringExtra("session_id")
-                val s = sessionId?.let { Stores.loadSession(it) } ?: Session(task)
+                val s = sessionId?.let { Stores.loadSession(it) } ?: Session(task.ifBlank { ids.firstOrNull()?.let { runCatching { Attachments.metadata(it).name }.getOrNull() } ?: "Attachments" })
                 s.status = "RUNNING"; s.summary = ""
-                s.log("user", task)
+                // User event is recorded after attachment payloads are loaded on the worker.
                 activeSession = s; AppState.session = s
                 val notification = notification("Starting task")
                 if (Build.VERSION.SDK_INT >= 34) startForeground(72, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) else startForeground(72, notification)
                 PhoneAccessibilityService.instance?.showControls()
-                worker = Thread({ run(s, task) }, "phone-agent").also { it.start() }
+                worker = Thread({ run(s, task, ids) }, "phone-agent").also { it.start() }
                 AppState.changed()
             }
             else -> if (worker == null) stopSelf()
@@ -68,13 +70,18 @@ class AgentService : Service() {
     fun pauseFor(reason: String) { paused.set(true); activeSession?.let { it.status = "PAUSED"; it.log("system", reason) }; refresh("Paused") }
     fun togglePause() { if (paused.get()) resumeRun() else pauseFor("Paused. No new action will be dispatched.") }
     fun resumeRun() { if (activeSession?.status == "WAITING") return; paused.set(false); activeSession?.status = "RUNNING"; refresh("Continuing"); AppState.changed() }
-    fun reply(text: String) { if (activeSession?.status == "WAITING" && text.isNotBlank()) { answer.set(text); AppState.changed() } }
+    fun reply(text: String, ids: List<String> = emptyList()): Boolean {
+        if(activeSession?.status != "WAITING" || (text.isBlank() && ids.isEmpty())) return false
+        val accepted=answer.compareAndSet(null, Answer(text, ids))
+        if(accepted) AppState.changed()
+        return accepted
+    }
     private fun checkpoint() {
         if (stopped.get()) throw InterruptedException(stopReason)
         while (paused.get()) { if (stopped.get()) throw InterruptedException(stopReason); Thread.sleep(100) }
         PhoneAccessibilityService.instance?.assertAvailable() ?: error("Accessibility service is not connected.")
     }
-    private fun run(s: Session, task: String) {
+    private fun run(s: Session, task: String, ids: List<String>) {
         try {
             val config = Stores.config(); config.validate()
             require(Stores.consented()) { "Read and accept the phone-control disclosure first." }
@@ -89,7 +96,9 @@ class AgentService : Service() {
                 s.pending = null
             } else s.conversation = Conversation(config.provider)
             s.provider = config.provider; s.model = config.model; s.endpoint = config.endpoint.trimEnd('/')
-            s.conversation.addUser(task)
+            val attachments = Attachments.load(ids)
+            s.log("user", task, attachments.map { it.attachment })
+            s.conversation.addUser(task, attachments)
             client = ProviderClient(config)
             s.log("system", "Started · ${config.model}. The agent and tools run on this phone.")
             // Let the start-button transition and keyboard dismissal settle before observing.
@@ -104,7 +113,7 @@ class AgentService : Service() {
             for (turn in 1..config.maxSteps) {
                 checkpoint()
                 if (SystemClock.elapsedRealtime() > deadline) { end(s, "LIMIT", "Reached the 15-minute session limit."); return }
-                if (s.input - previousInput >= config.maxInputTokens || s.conversation.messages.toString().length > 6_000_000) {
+                if (s.input - previousInput >= config.maxInputTokens || s.conversation.messages.toString().length > 8_000_000) {
                     end(s, "LIMIT", "Reached the task's token or context budget. Start a new task to continue; history was not silently rewritten."); return
                 }
                 s.step = turn; refresh("Thinking · step $turn"); AppState.changed()
@@ -130,6 +139,7 @@ class AgentService : Service() {
                 val interaction = if (call.name !in setOf("finish", "ask_user")) s.startInteraction(call) else -1
                 Stores.saveSession(s) // Durable intent before any external effect.
                 val result: ToolOutput
+                var replyAttachments = emptyList<AttachmentInput>()
                 try {
                     PhoneTools.validate(call)
                     when (call.name) {
@@ -145,8 +155,9 @@ class AgentService : Service() {
                             while (answer.get() == null) { if (stopped.get()) throw InterruptedException(stopReason); Thread.sleep(150) }
                             s.status = "RUNNING"
                             val text = answer.getAndSet(null)!!
-                            s.log("user", text)
-                            result = ToolOutput(obj("user_reply" to text, "observation" to phone.observe()))
+                            replyAttachments = Attachments.load(text.ids)
+                            s.log("user", text.text, replyAttachments.map { it.attachment })
+                            result = ToolOutput(obj("user_reply" to text.text, "observation" to phone.observe()))
                         }
                         else -> {
                             if (call.name == "screenshot") {
@@ -175,6 +186,7 @@ class AgentService : Service() {
                     continue
                 }
                 s.conversation.addResult(call, result); s.pending = null
+                if(replyAttachments.isNotEmpty()) s.conversation.addUser("Attachments supplied with your reply:", replyAttachments)
                 Stores.saveSession(s); AppState.changed()
             }
             end(s, "LIMIT", "Reached the ${config.maxSteps}-step limit. Review progress before starting another task.")

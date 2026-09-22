@@ -36,6 +36,11 @@ class MainActivity : Activity() {
     private lateinit var scroll: ScrollView
     private lateinit var empty: TextView
     private lateinit var composer: EditText
+    private lateinit var attach: ChatIcon
+    private lateinit var attachmentTray: LinearLayout
+    private var attachmentRows = ""
+    private var pickerKey: String? = null
+    private val draftKey get() = selected?.id ?: "new"
     private lateinit var send: ChatIcon
     private lateinit var status: TextView
     private lateinit var chatBody: FrameLayout
@@ -63,10 +68,12 @@ class MainActivity : Activity() {
             AppState.session?.takeIf { it.id==id } ?: Stores.sessions().firstOrNull { it.id==id }
         } ?: if(savedInstanceState==null && AgentService.current!=null) AppState.session else null
         draft=savedInstanceState?.getString("draft").orEmpty()
+        pickerKey=savedInstanceState?.getString("picker_key")
         showChat()
         if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) { handleBack() }
     }
     override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("picker_key",pickerKey)
         outState.putString("chat_id", selected?.id); outState.putString("draft", if(page=="Chat") composer.text.toString() else draft)
         super.onSaveInstanceState(outState)
     }
@@ -103,7 +110,10 @@ class MainActivity : Activity() {
     private fun hideKeyboard() { (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(composer.windowToken,0); composer.clearFocus() }
     private fun newChat() {
         chatDrafts.remove("new")
-        if(selected==null && !switching) { composer.setText(""); draft=""; drawer.close() }
+        if(selected==null && !switching) {
+            if(Attachments.busy("new")) return
+            Attachments.ids("new").forEach { Attachments.remove("new",it) }; renderAttachments()
+            composer.setText(""); draft=""; drawer.close() }
         else switchConversation(null)
     }
     private fun switchConversation(next: Session?) {
@@ -150,7 +160,12 @@ class MainActivity : Activity() {
         status=label("",13f,Palette.muted).apply { gravity=Gravity.CENTER; setPadding(dp(20),dp(8),dp(20),dp(8)); setOnClickListener { haptic(); selected?.let { if(it.status=="PAUSED") AgentService.current?.resumeRun() else showSession(it) } } }
         main.fill(status)
         val footer=column().apply { setPadding(dp(14),dp(4),dp(14),dp(12)) }
+        attachmentRows=""
+        attachmentTray=column()
+        footer.fill(attachmentTray)
         val compose=row().apply { gravity=Gravity.BOTTOM; background=background(Palette.surface,dp(28).toFloat()); setPadding(dp(8),dp(5),dp(5),dp(5)) }
+        attach=ChatIcon(this,"attach","Add attachments") { chooseAttachments() }
+        compose.addView(attach,LinearLayout.LayoutParams(dp(42),dp(46)))
         composer=field("Message",draft,multiline=true).apply { background=null; minHeight=dp(46); maxLines=5; setPadding(dp(12),dp(12),dp(8),dp(12)); contentDescription="Message" }
         compose.addView(composer,LinearLayout.LayoutParams(0,-2,1f))
         send=ChatIcon(this,"send","Send message",true) { sendMessage() }
@@ -168,7 +183,7 @@ class MainActivity : Activity() {
         val waiting=active && s?.status=="WAITING"
         val entries=mutableListOf<RunEvent>()
         if(s!=null) {
-            if(s.events.firstOrNull { it.kind=="user" }?.text!=s.task) entries.add(RunEvent("user",s.task,s.started))
+            if(s.events.none { it.kind=="user" }) entries.add(RunEvent("user",s.task,s.started))
             s.events.filter { it.kind!="system" || !it.text.startsWith("Started ·") }.forEach { event ->
                 val previous=entries.lastOrNull()
                 if(event.kind=="user" || event.kind=="tool" || previous?.text!=event.text) entries.add(event)
@@ -212,7 +227,10 @@ class MainActivity : Activity() {
         composer.isEnabled=!awaitingStart && (!active || waiting)
         composer.hint=if(waiting) "Reply" else "Message"
         send.show(if(active && !waiting) "stop" else "send",if(active && !waiting) "Stop agent" else "Send message")
-        send.isEnabled=!awaitingStart
+        send.isEnabled=!awaitingStart && !Attachments.busy(draftKey)
+        attach.isEnabled=composer.isEnabled && !Attachments.busy(draftKey)
+        attach.alpha=if(attach.isEnabled) 1f else .35f
+        renderAttachments()
     }
     private fun eventView(event: RunEvent, index: Int): View {
         val wrapper=column()
@@ -244,7 +262,12 @@ class MainActivity : Activity() {
                 setTextIsSelectable(true); setLineSpacing(dp(4).toFloat(),1f)
                 if(user) { background=background(Palette.surface,dp(22).toFloat()); setPadding(dp(16),dp(12),dp(16),dp(12)); maxWidth=(resources.displayMetrics.widthPixels*.82f).toInt() }
             }
-            container.addView(message,LinearLayout.LayoutParams(if(user) -2 else -1,-2))
+            val bubble=column().apply { gravity=if(user) Gravity.END else Gravity.START }
+            event.attachments.forEach { a ->
+                bubble.addView(attachmentView(a),LinearLayout.LayoutParams(dp(250),-2).apply { bottomMargin=dp(6) })
+            }
+            if(event.text.isNotBlank()) bubble.addView(message,LinearLayout.LayoutParams(if(user) -2 else -1,-2))
+            container.addView(bubble,LinearLayout.LayoutParams(if(user) -2 else -1,-2))
             wrapper.fill(container); wrapper.gap(24)
         }
         return wrapper
@@ -279,15 +302,86 @@ class MainActivity : Activity() {
         settings.addView(ChatIcon(this,"settings","Open settings") { showSettings() },LinearLayout.LayoutParams(dp(48),dp(48)))
         settings.addView(label("Settings",16f,Palette.ink,true)); history.fill(settings)
     }
+    private fun chooseAttachments() {
+        if(Attachments.busy(draftKey)) return
+        AlertDialog.Builder(this).setTitle("Attach")
+            .setItems(arrayOf("Photos", "Files")) { _, which ->
+                pickerKey=draftKey
+                val intent=Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType(if(which==0) "image/*" else "*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                try { startActivityForResult(intent,70) } catch(_: Exception) { toast("No file picker is available.") }
+            }.show()
+    }
+    @Deprecated("Platform document picker result")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode,resultCode,data)
+        if(requestCode!=70 || resultCode!=RESULT_OK || data==null) return
+        val uris=data.clipData?.let { clip -> (0 until clip.itemCount).map { clip.getItemAt(it).uri } } ?: listOfNotNull(data.data)
+        Attachments.importUris(pickerKey ?: draftKey,uris.distinct())
+        pickerKey=null
+    }
+    private fun attachmentView(a: Attachment): View {
+        val card=column().apply {
+            background=background(Palette.surface,dp(16).toFloat(),Palette.border)
+            setPadding(dp(10),dp(10),dp(10),dp(10))
+        }
+        if(a.thumbnail.isNotBlank()) {
+            val bytes=android.util.Base64.decode(a.thumbnail,android.util.Base64.NO_WRAP)
+            val picture=ImageView(this).apply {
+                setImageBitmap(android.graphics.BitmapFactory.decodeByteArray(bytes,0,bytes.size))
+                scaleType=ImageView.ScaleType.FIT_CENTER
+                contentDescription="Image: ${a.name}"
+                background=background(Palette.surface,dp(10).toFloat()); clipToOutline=true
+            }
+            card.addView(picture,LinearLayout.LayoutParams(-1,dp(120))); card.gap(8)
+        }
+        card.fill(label(a.name,13f,Palette.ink,true).apply { maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
+        val kind=when { a.mime.startsWith("image/") -> "Image"; a.mime=="application/pdf" -> "PDF"; a.name.endsWith(".docx",true) -> "Word · text"; else -> "Text" }
+        card.fill(label("$kind · ${android.text.format.Formatter.formatShortFileSize(this,a.size.toLong())}",11f,Palette.muted))
+        return card
+    }
+    private fun renderAttachments() {
+        val key=draftKey
+        val ids=Attachments.ids(key)
+        val busy=Attachments.busy(key)
+        Attachments.takeError(key)?.let { toast(it) }
+        val rows="$key:$ids:$busy"
+        if(rows==attachmentRows) return
+        attachmentRows=rows; attachmentTray.removeAllViews()
+        attachmentTray.visibility=if(ids.isEmpty() && !busy) View.GONE else View.VISIBLE
+        if(ids.isNotEmpty()) {
+            val cards=row().apply { gravity=Gravity.TOP }
+            Attachments.draft(key).forEach { a ->
+                val frame=FrameLayout(this)
+                frame.addView(attachmentView(a),FrameLayout.LayoutParams(-1,-2))
+                frame.addView(ChatIcon(this,"close","Remove ${a.name}") { Attachments.remove(key,a.id) }.apply {
+                    background=background(Palette.bg,dp(20).toFloat())
+                },FrameLayout.LayoutParams(dp(36),dp(36),Gravity.TOP or Gravity.END))
+                cards.addView(frame,LinearLayout.LayoutParams(dp(180),-2).apply { rightMargin=dp(8) })
+            }
+            attachmentTray.fill(object : HorizontalScrollView(this) {
+                override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+                    if(event.actionMasked==android.view.MotionEvent.ACTION_DOWN) parent.requestDisallowInterceptTouchEvent(true)
+                    return super.dispatchTouchEvent(event)
+                }
+            }.apply { isHorizontalScrollBarEnabled=false; addView(cards) })
+        }
+        if(busy) attachmentTray.fill(label("Preparing attachments…",12f,Palette.muted))
+        attachmentTray.gap(8)
+    }
     private fun sendMessage() {
+        if(Attachments.busy(draftKey)) return
+        val attachmentIds=Attachments.ids(draftKey)
         val active=AgentService.current
         if(active!=null) {
             if(AppState.session?.id!=selected?.id) { toast("Stop the running chat before sending another message."); return }
             if(selected?.status!="WAITING") { active.stopRun(); return }
-            val reply=composer.text.toString().trim(); if(reply.isBlank()) return
-            active.reply(reply); composer.setText(""); draft=""; hideKeyboard(); return
+            val reply=composer.text.toString().trim(); if(reply.isBlank() && attachmentIds.isEmpty()) return
+            if(!active.reply(reply,attachmentIds)) return
+            Attachments.forgetDraft(draftKey); renderAttachments(); composer.setText(""); draft=""; hideKeyboard(); return
         }
-        val task=composer.text.toString().trim(); if(task.isBlank()) return
+        val task=composer.text.toString().trim(); if(task.isBlank() && attachmentIds.isEmpty()) return
         val config=Stores.config()
         try { config.validate() } catch(_:Exception) { draft=task; showSettings(); toast("Add your API connection to start chatting."); return }
         if(!Stores.consented() || PhoneAccessibilityService.instance==null) { disclosure(); return }
@@ -300,8 +394,9 @@ class MainActivity : Activity() {
             }
         }
         if(Build.VERSION.SDK_INT>=33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS),4)
+        Attachments.forgetDraft(draftKey)
         hideKeyboard(); draft=""; composer.setText(""); awaitingStart=true; updateChat()
-        startForegroundService(Intent(this,AgentService::class.java).setAction(AgentService.START).putExtra("task",task.take(12000)).putExtra("session_id",selected?.id))
+        startForegroundService(Intent(this,AgentService::class.java).setAction(AgentService.START).putExtra("task",task.take(12000)).putExtra("session_id",selected?.id).putStringArrayListExtra("attachments",ArrayList(attachmentIds)))
     }
     private fun showSettings() {
         if(page=="Chat") { draft=composer.text.toString(); hideKeyboard() }
@@ -316,7 +411,7 @@ class MainActivity : Activity() {
     }
     private fun disclosure() {
         AlertDialog.Builder(this).setTitle("Let your agent use this phone")
-            .setMessage("During tasks you start, Android Use reads the current screen and can tap, type, scroll, and open apps. Screen text and requested screenshots are sent directly to the model provider you choose.\n\nYour API key and task history are encrypted on this device. There is no Android Use server. Stop at any time using the floating control or notification.\n\nOn some sideloaded installs, first open App info → ⋮ → Allow restricted settings, then enable Android Use in Accessibility.")
+            .setMessage("During tasks you start, Android Use reads the current screen and can tap, type, scroll, and open apps. Screen text, requested screenshots, and chat attachments are sent directly to the model provider you choose.\n\nYour API key and task history are encrypted on this device. There is no Android Use server. Stop at any time using the floating control or notification.\n\nOn some sideloaded installs, first open App info → ⋮ → Allow restricted settings, then enable Android Use in Accessibility.")
             .setNegativeButton("Not now", null).setPositiveButton("Agree & open Settings") { _, _ -> Stores.consent(); startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.show()
     }
     private fun field(hint: String, value: String = "", secret: Boolean = false, multiline: Boolean = false): EditText = EditText(this).apply {

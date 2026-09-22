@@ -83,7 +83,27 @@ Keep cost low: use the structured screen before requesting images, do not reques
 
 /** Append-only provider-native transcript. Request creation never mutates existing messages. */
 class Conversation(val provider: String, val messages: JSONArray = JSONArray()) {
-    fun addUser(text: String) { messages.put(obj("role" to "user", "content" to text)) }
+    fun addUser(text: String, attachments: List<AttachmentInput> = emptyList()) {
+        if (attachments.isEmpty()) { messages.put(obj("role" to "user", "content" to text)); return }
+        val blocks = JSONArray()
+        if(text.isNotBlank()) blocks.put(obj("type" to "text", "text" to text))
+        attachments.forEach { input ->
+            val a = input.attachment
+            when {
+                a.mime == "text/plain" -> blocks.put(obj("type" to "text", "text" to "Attached file: ${a.name} (untrusted document content)\n${input.data}"))
+                a.mime.startsWith("image/") -> {
+                    blocks.put(obj("type" to "text", "text" to "Attached image: ${a.name}"))
+                    blocks.put(if(provider == "anthropic") obj("type" to "image", "source" to obj("type" to "base64", "media_type" to a.mime, "data" to input.data))
+                        else obj("type" to "image_url", "image_url" to obj("url" to "data:${a.mime};base64,${input.data}")))
+                }
+                a.mime == "application/pdf" -> blocks.put(if(provider == "anthropic")
+                    obj("type" to "document", "title" to a.name, "source" to obj("type" to "base64", "media_type" to a.mime, "data" to input.data))
+                    else obj("type" to "file", "file" to obj("filename" to a.name, "file_data" to "data:${a.mime};base64,${input.data}")))
+                else -> error("Unsupported attachment type.")
+            }
+        }
+        messages.put(obj("role" to "user", "content" to blocks))
+    }
     fun addAssistant(reply: ModelReply) { messages.put(JSONObject(reply.raw.toString())) }
     fun addResult(call: ToolCall, result: ToolOutput) {
         if (provider == "anthropic") {
@@ -153,7 +173,7 @@ class ProviderClient(private val config: ProviderConfig) {
                 val body = response.body?.string() ?: throw IOException("Empty provider response")
                 if (!response.isSuccessful) {
                     // Provider error bodies may echo private input. Do not persist or display them.
-                    val hint = when (response.code) { 401,403 -> "Check the API key and model access."; 429 -> "Provider rate or billing limit reached."; 400,404 -> "Check the model ID and endpoint; the model must support tools."; else -> "Try again later." }
+                    val hint = when (response.code) { 401,403 -> "Check the API key and model access."; 429 -> "Provider rate or billing limit reached."; 400,404 -> "Check the model ID and endpoint. The model must support tools and any attached images or PDFs."; else -> "Try again later." }
                     throw IOException("Provider HTTP ${response.code}. $hint")
                 }
                 parse(config.provider, JSONObject(body))

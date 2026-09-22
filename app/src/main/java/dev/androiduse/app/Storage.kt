@@ -58,7 +58,7 @@ object Vault {
     }
 }
 
-data class RunEvent(val kind: String, val text: String, val time: Long = System.currentTimeMillis(), val details: String = "", val state: String = "")
+data class RunEvent(val kind: String, val text: String, val time: Long = System.currentTimeMillis(), val details: String = "", val state: String = "", val attachments: List<Attachment> = emptyList())
 class Session(val task: String, val id: String = UUID.randomUUID().toString(), val started: Long = System.currentTimeMillis()) {
     @Volatile var status = "RUNNING"
     @Volatile var summary = ""
@@ -73,7 +73,7 @@ class Session(val task: String, val id: String = UUID.randomUUID().toString(), v
     var pending: JSONObject? = null
     var conversation = Conversation("openai")
     val events = CopyOnWriteArrayList<RunEvent>()
-    fun log(kind: String, text: String) { events.add(RunEvent(kind, text.take(if (kind in setOf("user", "agent", "question", "result")) 16000 else 3000))); AppState.changed() }
+    fun log(kind: String, text: String, attachments: List<Attachment> = emptyList()) { events.add(RunEvent(kind, text.take(if (kind in setOf("user", "agent", "question", "result")) 16000 else 3000), attachments = attachments)); AppState.changed() }
     fun startInteraction(call: ToolCall): Int {
         val title = when (call.name) {
             "observe" -> "Read screen"; "screenshot" -> "Take screenshot"; "tap" -> "Tap"; "long_press" -> "Long press"
@@ -99,7 +99,7 @@ class Session(val task: String, val id: String = UUID.randomUUID().toString(), v
     fun json() = obj("id" to id, "task" to task, "started" to started, "status" to status, "summary" to summary,
         "step" to step, "input" to input, "cached" to cached, "output" to output, "cacheWrite" to cacheWrite,
         "provider" to provider, "model" to model, "endpoint" to endpoint, "pending" to pending, "messages" to conversation.messages,
-        "events" to JSONArray().also { a -> events.forEach { a.put(obj("kind" to it.kind, "text" to it.text, "time" to it.time, "details" to it.details, "state" to it.state)) } })
+        "events" to JSONArray().also { a -> events.forEach { a.put(obj("kind" to it.kind, "text" to it.text, "time" to it.time, "details" to it.details, "state" to it.state, "attachments" to JSONArray(it.attachments.map { a -> a.json() }))) } })
     companion object {
         fun from(j: JSONObject, transcript: Boolean = false): Session = Session(j.getString("task"), j.getString("id"), j.getLong("started")).apply {
             status = j.getString("status"); summary = j.optString("summary"); step = j.optInt("step")
@@ -108,7 +108,7 @@ class Session(val task: String, val id: String = UUID.randomUUID().toString(), v
             // Loading history does not resume inference or retain all image payloads
             // from up to 40 old transcripts in the UI heap. The encrypted journal stays on disk.
             conversation = Conversation(provider, if (transcript) j.optJSONArray("messages") ?: JSONArray() else JSONArray())
-            j.optJSONArray("events")?.objects()?.forEach { events.add(RunEvent(it.getString("kind"), it.getString("text"), it.getLong("time"), it.optString("details"), it.optString("state"))) }
+            j.optJSONArray("events")?.objects()?.forEach { events.add(RunEvent(it.getString("kind"), it.getString("text"), it.getLong("time"), it.optString("details"), it.optString("state"), it.optJSONArray("attachments")?.objects()?.map(Attachment::from) ?: emptyList())) }
         }
     }
 }
@@ -124,6 +124,7 @@ object Stores {
     private lateinit var context: Context
     fun init(ctx: Context) {
         context = ctx.applicationContext
+        Attachments.init(context)
         migrateTokenDefault()
     }
     fun migrateTokenDefault() {
@@ -154,7 +155,11 @@ object Stores {
         val bytes = Vault.encrypt(s.json().toString()).toByteArray()
         val out = file.startWrite()
         try { out.write(bytes); file.finishWrite(out) } catch (e: Exception) { file.failWrite(out); throw e }
-        folder().listFiles()?.filter { it.name.endsWith(".enc") }?.sortedByDescending { it.lastModified() }?.drop(40)?.forEach { it.delete() }
+        folder().listFiles()?.filter { it.name.endsWith(".enc") }?.sortedByDescending { it.lastModified() }?.drop(40)?.forEach { expired ->
+            runCatching { Session.from(JSONObject(Vault.decrypt(AtomicFile(expired).readFully().toString(Charsets.UTF_8)))) }
+                .getOrNull()?.events?.flatMap { it.attachments }?.forEach { Attachments.delete(it.id) }
+            expired.delete()
+        }
     }
     @Synchronized fun sessions(): List<Session> = folder().listFiles()?.filter { it.name.endsWith(".enc") }?.sortedByDescending { it.lastModified() }?.mapNotNull {
         try { Session.from(JSONObject(Vault.decrypt(AtomicFile(it).readFully().toString(Charsets.UTF_8)))) } catch (_: Exception) { null }
@@ -166,5 +171,5 @@ object Stores {
             Session.from(JSONObject(Vault.decrypt(bytes.toString(Charsets.UTF_8))), transcript = true)
         } catch (_: Exception) { null }
     }
-    fun clearHistory() { check(AgentService.current == null) { "Stop the active task first." }; folder().listFiles()?.forEach { it.delete() }; AppState.session = null; AppState.changed() }
+    fun clearHistory() { check(AgentService.current == null) { "Stop the active task first." }; Attachments.clear(); folder().listFiles()?.forEach { it.delete() }; AppState.session = null; AppState.changed() }
 }

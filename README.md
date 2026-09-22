@@ -1,6 +1,6 @@
 # Android Use
 
-[Download the signed v0.3.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.3.0/android-use-0.3.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
+[Download the signed v0.4.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.4.0/android-use-0.4.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
 
 GitHub release downloads do not depend on a development computer. The installation-page mirror requires its hosting PC to stay online.
 
@@ -19,6 +19,25 @@ Screenshots show sample conversation data.
 The drawer follows your finger, settles according to swipe speed, and fades its backdrop. Switching chats crossfades the conversation while keeping the header and composer in place, and restores each chat’s draft and scroll position during the activity’s lifetime. Controls and new question/completion messages provide light haptic feedback, respecting Android settings. Animations respect the system animation setting.
 
 You can send follow-up messages in chats created with v0.2 or later. The app reloads the encrypted provider transcript and appends new messages without rewriting earlier context. Keep the same provider, endpoint and model for that chat. Older v0.1 history remains readable; start a new chat for replies.
+
+## Images and files
+
+<img src="docs/screenshots/attachment-composer.png" width="240" alt="Photo attachment preview before sending"> <img src="docs/screenshots/attachment-chat.png" width="240" alt="Image attachment inside a chat">
+
+Tap **+** beside the message field and choose **Photos** or **Files**. Select one or several items through Android’s document picker. Preview or remove attachments before sending; a message can contain attachments without any text. Sent attachments appear in the chat and remain available to the model in follow-ups and replies to agent questions.
+
+- Images: Android-supported bitmap formats, including JPEG, PNG, WebP and HEIC. Images are normalized once to JPEG, at most 1600 pixels on the longer edge. Animated images send their first frame.
+- PDFs: sent as native PDF input to the selected provider. The model and endpoint must support PDF input.
+- Text, Markdown, CSV, JSON, XML, HTML, YAML and common source files: UTF-8 text, up to 100,000 characters and 200 KB source size.
+- DOCX: extracted main-document text only, up to 100,000 characters; embedded images, formatting, headers and footers are not included. Other binary formats, audio and video are not supported yet.
+
+Up to four attachments per message, totaling 4 MiB after preparation. Image source files can be up to 20 MiB; PDF and DOCX sources up to 4 MiB. Large or unsupported files show an error before sending. DOCX decompression is bounded. Provider-specific page counts, context windows and file limits still apply. OpenAI-compatible endpoints vary in image/PDF support; text attachments work with text models that support tools.
+
+Preparation runs off the UI thread. File content, names and thumbnails are encrypted locally with Android Keystore. Attachment drafts survive rotation, chat switching and process recreation. The app copies selected content into private storage, so it does not need broad storage permission or continued access to the original file. **Delete chat history** also deletes attachment drafts and stored payloads.
+
+Attachments go directly to your configured inference endpoint when you send. They are appended once to the provider transcript, preserving earlier request content for caching. They are model inputs; this feature does not upload the files into other phone apps automatically.
+
+References: [OpenAI file input formats](https://developers.openai.com/api/docs/guides/file-inputs), [Anthropic PDF input](https://platform.claude.com/docs/en/build-with-claude/pdf-support).
 
 ## Install and use
 
@@ -41,7 +60,7 @@ The agent is implemented in Kotlin rather than Pi. The original research plan co
 - Anthropic requests enable automatic ephemeral prompt caching through top-level `cache_control`.
 - Screenshots can be disabled in settings, are requested as a tool, and limited to five per message. Text observations are bounded to 160 visible meaningful nodes.
 - **Usage & details** shows **provider-reported** input, output, cache-read, and cache-write tokens. Input limits include cached tokens and are checked between requests; one request can cross the budget.
-- Default limits are 24 model turns per user message, 10,000,000 cumulative input tokens per user message, a 15-minute run deadline checked between turns, and 6 MB of serialized conversation. There is no hidden automatic context rewriting. Send a follow-up to continue within a new run budget; start a new chat if the conversation reaches the context-size limit.
+- Default limits are 24 model turns per user message, 10,000,000 cumulative input tokens per user message, a 15-minute run deadline checked between turns, and 8 million characters of serialized conversation (including attachment data). There is no hidden automatic context rewriting. Send a follow-up to continue within a new run budget; start a new chat if the conversation reaches the context-size limit.
 
 The v0.3 upgrade changes a stored 100,000-token default to 10,000,000 once. Other saved limits are preserved, and you can still edit the budget in Settings.
 
@@ -54,6 +73,7 @@ References: [OpenAI prompt caching](https://developers.openai.com/api/docs/guide
 - `AgentCore.kt`: provider-neutral tool contracts, provider-native append-only conversations, schema checks, HTTP clients, usage parsing.
 - `AgentService.kt`: native foreground run owner, sequential execution, pause/question/stop states, budgets and durable action journal.
 - `PhoneAccessibilityService.kt`: window observations, unique references per snapshot, target revalidation, gestures, screenshots and Android actions.
+- `Attachments.kt`: bounded file import, image normalization, DOCX extraction, encrypted attachment payloads and persistent draft references.
 - `Storage.kt`: Android Keystore AES-GCM encryption for API credentials and complete session files; atomic file replacement for journal writes.
 - `MainActivity.kt`, `ChatViews.kt`, `Ui.kt`: native light chat, keyboard-aware composer, swipe drawer, settings and accessibility overlay.
 - `PracticeActivity.kt`: harmless UI for manual and automated phone-control tests.
@@ -66,7 +86,7 @@ The app persists action intent before dispatch. Android process death can leave 
 
 ## Privacy and limits
 
-Screen text and requested images go to the configured inference endpoint. History and credentials are encrypted locally, excluded from cloud backup/device transfer, and not sent to an Android Use service. The app's own control/credential screens are excluded from agent observations and screenshot tools. API credentials never enter prompts or task reports. Shared reports omit task text and screen contents.
+Screen text, requested images and chat attachments go to the configured inference endpoint. History and credentials are encrypted locally, excluded from cloud backup/device transfer, and not sent to an Android Use service. The app's own control/credential screens are excluded from agent observations and screenshot tools. API credentials never enter prompts or task reports. Shared reports omit task text and screen contents.
 
 The user explicitly enables accessibility and initiates each task. The model is instructed to treat screen content as untrusted data and ask for missing authorization. This is not a guarantee against prompt injection; task supervision is appropriate for an early release. Password entry, screen unlocking, protected screenshots, and some custom-drawn controls require manual handling. The app does not implement scheduled unattended tasks, local models, a custom keyboard, or automatic recovery/resume after process death.
 
@@ -116,7 +136,7 @@ Add `-no-window -no-audio` for headless use. Hardware acceleration uses `/dev/kv
 ./gradlew -PtestBuildType=release :app:testReleaseUnitTest :app:connectedReleaseAndroidTest :app:lintRelease
 ```
 
-Instrumented tests enable accessibility on the emulator using the test harness, exercise actual Android windows, and use a local scripted HTTP server for repeatable model responses. This server exists only in the test APK; it is not bundled into the app. The tests cover real controls, cross-app navigation, screenshot image payloads, stale-reference rejection, prefix preservation, cache usage parsing, encrypted credentials, cancellation, pause/resume, Anthropic question/reply behavior, exclusion of the agent's own controls, encrypted chat continuation, UI message sending, drawer navigation, rotation, keyboard layout, live inline action states, conversation draft restoration, and token-default migration. See [docs/TESTING.md](docs/TESTING.md) for recorded results and limitations.
+Instrumented tests enable accessibility on the emulator using the test harness, exercise actual Android windows, and use a local scripted HTTP server for repeatable model responses. This server exists only in the test APK; it is not bundled into the app. The tests cover real controls, cross-app navigation, screenshot image payloads, stale-reference rejection, prefix preservation, cache usage parsing, encrypted credentials, cancellation, pause/resume, Anthropic question/reply behavior, exclusion of the agent's own controls, encrypted chat continuation, UI message sending, drawer navigation, rotation, keyboard layout, live inline action states, conversation draft restoration, token-default migration, real document-picker selection, attachment removal/rotation, image-only sends, attachment prefix preservation, document extraction and encrypted file storage. See [docs/TESTING.md](docs/TESTING.md) for recorded results and limitations.
 
 ## Research
 

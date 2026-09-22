@@ -35,6 +35,8 @@ class ChatIcon(context: Context, var symbol: String, description: String, privat
         paint.style = Paint.Style.STROKE; paint.strokeWidth = 1.8f; paint.strokeCap = Paint.Cap.ROUND; paint.strokeJoin = Paint.Join.ROUND
         fun line(x1: Float, y1: Float, x2: Float, y2: Float) = canvas.drawLine(x1,y1,x2,y2,paint)
         when (symbol) {
+            "attach" -> { line(-8f,0f,8f,0f); line(0f,-8f,0f,8f) }
+            "close" -> { line(-5f,-5f,5f,5f); line(-5f,5f,5f,-5f) }
             "menu" -> { line(-9f,-4f,9f,-4f); line(-9f,4f,3f,4f) }
             "new" -> {
                 canvas.drawPath(Path().apply { moveTo(1f,-8f); lineTo(-8f,-8f); lineTo(-8f,9f); lineTo(9f,9f); lineTo(9f,0f) },paint)
