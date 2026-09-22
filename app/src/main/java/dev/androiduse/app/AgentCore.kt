@@ -18,10 +18,39 @@ fun JSONArray.objects(): List<JSONObject> = (0 until length()).map { getJSONObje
 data class ProviderConfig(
     val provider: String = "openai", val endpoint: String = "https://api.openai.com/v1",
     val model: String = "gpt-4.1-mini", val apiKey: String = "", val maxSteps: Int = 24,
-    val maxInputTokens: Int = DEFAULT_INPUT_TOKENS, val allowScreenshots: Boolean = true
+    val maxInputTokens: Int = DEFAULT_INPUT_TOKENS, val allowScreenshots: Boolean = true,
+    val reasoning: String = "default"
 ) {
-    companion object { const val DEFAULT_INPUT_TOKENS = 10_000_000 }
+    companion object {
+        const val DEFAULT_INPUT_TOKENS = 10_000_000
+        fun reasoningLevels(provider: String) = if(provider=="anthropic")
+            listOf("default", "none", "low", "medium", "high", "xhigh", "max")
+            else listOf("default", "none", "minimal", "low", "medium", "high", "xhigh", "max")
+        fun reasoningLabel(level: String) = when(level) {
+            "default" -> "Provider default"; "none" -> "Off"; "xhigh" -> "Extra high"; "max" -> "Maximum"
+            else -> level.replaceFirstChar { it.uppercase() }
+        }
+    }
+    val outputLimit: Int get() = if(provider=="anthropic" && manualThinking && reasoning in listOf("low","medium","high")) thinkingBudget+2048 else when(reasoning) {
+        "minimal" -> 4096; "low" -> 8192; "medium" -> 16384; "high", "xhigh", "max" -> 32768; else -> 2048
+    }
+    val manualThinking: Boolean get() = model.matches(Regex("claude-(?:(?:sonnet|opus|haiku)-4(?:-[015])?|3-7-sonnet)(?:-[0-9]{8}|-latest)?"))
+    private val thinkingBudget get() = when(reasoning) { "low" -> 1024; "medium" -> 4096; else -> 8192 }
+    fun applyReasoning(request: JSONObject) {
+        if(reasoning=="default") return
+        if(provider=="openai") { request.put("reasoning_effort",reasoning); return }
+        if(reasoning=="none") { request.put("thinking",obj("type" to "disabled")); return }
+        if(manualThinking) {
+            request.put("thinking",obj("type" to "enabled", "budget_tokens" to thinkingBudget))
+            if(model.startsWith("claude-opus-4-5")) request.put("output_config",obj("effort" to reasoning))
+        } else {
+            request.put("thinking",obj("type" to "adaptive"))
+            request.put("output_config",obj("effort" to reasoning))
+        }
+    }
     fun validate() {
+        require(reasoning in reasoningLevels(provider)) { "Choose a supported reasoning level." }
+        require(provider!="anthropic" || !manualThinking || reasoning !in listOf("xhigh","max")) { "This Claude model supports Low, Medium or High thinking. Choose one of those levels." }
         require(provider in listOf("openai", "anthropic")) { "Choose a supported provider." }
         val uri = try { URI(endpoint) } catch (_: Exception) { throw IllegalArgumentException("Enter a valid API base URL.") }
         require(uri.host != null && uri.userInfo == null && uri.query == null && uri.fragment == null) { "Use a base URL without credentials, query, or fragment." }
@@ -141,12 +170,13 @@ class Conversation(val provider: String, val messages: JSONArray = JSONArray()) 
         val copy = JSONArray(messages.toString())
         return if (provider == "anthropic") {
             val tools = JSONArray().also { a -> PhoneTools.definitions.objects().forEach { t -> a.put(obj("name" to t.getString("name"), "description" to t.getString("description"), "input_schema" to t.getJSONObject("parameters"))) } }
-            obj("model" to config.model, "max_tokens" to 2048, "system" to PhoneTools.SYSTEM, "tools" to tools, "messages" to copy, "cache_control" to obj("type" to "ephemeral"))
+            obj("model" to config.model, "max_tokens" to config.outputLimit, "system" to PhoneTools.SYSTEM, "tools" to tools, "messages" to copy, "cache_control" to obj("type" to "ephemeral")).also { config.applyReasoning(it) }
         } else {
             val all = arr(obj("role" to "system", "content" to PhoneTools.SYSTEM))
             for (i in 0 until copy.length()) all.put(copy.get(i))
             val tools = JSONArray().also { a -> PhoneTools.definitions.objects().forEach { a.put(obj("type" to "function", "function" to JSONObject(it.toString()))) } }
-            obj("model" to config.model, "messages" to all, "tools" to tools, "max_completion_tokens" to 2048, "parallel_tool_calls" to false).also {
+            obj("model" to config.model, "messages" to all, "tools" to tools, "max_completion_tokens" to config.outputLimit, "parallel_tool_calls" to false).also {
+                config.applyReasoning(it)
                 if (URI(config.endpoint).host == "api.openai.com") it.put("prompt_cache_key", "android-use-phone-v1")
             }
         }
@@ -154,8 +184,8 @@ class Conversation(val provider: String, val messages: JSONArray = JSONArray()) 
 }
 
 class ProviderClient(private val config: ProviderConfig) {
-    private val http = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS)
-        .callTimeout(150, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
+    private val http = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(if(config.outputLimit>2048) 300 else 120, TimeUnit.SECONDS)
+        .callTimeout(if(config.outputLimit>2048) 360 else 150, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
     @Volatile private var active: Call? = null
     @Volatile private var cancelled = false
     fun cancel() { cancelled = true; active?.cancel() }
@@ -173,7 +203,7 @@ class ProviderClient(private val config: ProviderConfig) {
                 val body = response.body?.string() ?: throw IOException("Empty provider response")
                 if (!response.isSuccessful) {
                     // Provider error bodies may echo private input. Do not persist or display them.
-                    val hint = when (response.code) { 401,403 -> "Check the API key and model access."; 429 -> "Provider rate or billing limit reached."; 400,404 -> "Check the model ID and endpoint. The model must support tools and any attached images or PDFs."; else -> "Try again later." }
+                    val hint = when (response.code) { 401,403 -> "Check the API key and model access."; 429 -> "Provider rate or billing limit reached."; 400,404 -> "Check the model ID and endpoint. The model must support tools, the selected reasoning level, and any attached images or PDFs. Try Provider default reasoning in a new chat if unsupported."; else -> "Try again later." }
                     throw IOException("Provider HTTP ${response.code}. $hint")
                 }
                 parse(config.provider, JSONObject(body))

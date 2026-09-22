@@ -83,7 +83,8 @@ class AgentService : Service() {
     }
     private fun run(s: Session, task: String, ids: List<String>) {
         try {
-            val config = Stores.config(); config.validate()
+            val config = Stores.config().let { if(s.conversation.messages.length()>0) it.copy(reasoning=s.reasoning) else it }
+            config.validate()
             require(Stores.consented()) { "Read and accept the phone-control disclosure first." }
             val phone = PhoneAccessibilityService.instance ?: error("Enable Android Use in Accessibility settings.")
             phone.assertAvailable()
@@ -95,6 +96,7 @@ class AgentService : Service() {
                 s.conversation.closeInterruptedCalls()
                 s.pending = null
             } else s.conversation = Conversation(config.provider)
+            s.reasoning = config.reasoning
             s.provider = config.provider; s.model = config.model; s.endpoint = config.endpoint.trimEnd('/')
             val attachments = Attachments.load(ids)
             s.log("user", task, attachments.map { it.attachment })

@@ -1,6 +1,6 @@
 # Android Use
 
-[Download the signed v0.4.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.4.0/android-use-0.4.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
+[Download the signed v0.5.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.5.0/android-use-0.5.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
 
 GitHub release downloads do not depend on a development computer. The installation-page mirror requires its hosting PC to stay online.
 
@@ -43,12 +43,22 @@ References: [OpenAI file input formats](https://developers.openai.com/api/docs/g
 
 1. Install the signed APK on an Android 11+ phone.
 2. Swipe right or tap the menu, then open **Settings**. Choose a provider, API base URL, model ID, and your API key. The default is OpenAI-compatible, `https://api.openai.com/v1`, `gpt-4.1-mini`. Use a model supporting function calls; image input is needed for screenshots. Anthropic defaults to `https://api.anthropic.com/v1`, `claude-sonnet-4-6`.
-3. Save the connection. **Test connection** sends one small billable model request.
+3. Save the connection. **Test connection** sends one billable model request using these settings.
 4. Read the phone-control disclosure and enable **Android Use phone control** in Android Accessibility settings. If Android blocks a sideloaded accessibility service, use the app's system **App info → ⋮ → Allow restricted settings**, then return to Accessibility.
 5. Keep the phone unlocked. Start with “Open Android Use practice and save a note saying Hello from my phone.” The practice activity is a real notepad UI that changes in response to accessibility actions.
 6. Use the floating controls or persistent notification to pause or stop. Open the app to answer an agent question. A dispatched gesture may complete, but stopping cancels inference and blocks later dispatches.
 
 The release APK contains no API key or predefined test-provider configuration. Each user's configuration is local. HTTPS is required for remote endpoints. Loopback HTTP is supported for local providers and emulator development.
+
+## Reasoning level
+
+Choose **Settings → Reasoning level** and save. Options are **Provider default**, **Off**, **Minimal** (OpenAI-compatible), **Low**, **Medium**, **High**, **Extra high**, and **Maximum**. Supported levels depend on your model and endpoint. Leave **Provider default** selected for models such as the app’s default GPT-4.1 mini that do not accept reasoning controls.
+
+The setting applies to **new chats**. Existing chats keep their original level, shown in **Usage & details**. Chats from older versions retain Provider default. This keeps the effort setting constant throughout each conversation; changing top-level effort can invalidate Claude’s prompt cache. [Claude effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort)
+
+OpenAI-compatible requests use `reasoning_effort`. Claude uses adaptive thinking with `output_config.effort`; recognized older Claude 4/4.1/4.5 and Sonnet 3.7 IDs use manual thinking budgets of 1,024 / 4,096 / 8,192 tokens for Low / Medium / High. Off requests disabled thinking. Unsupported combinations return an error instead of silently choosing a different level. [OpenAI reasoning controls](https://developers.openai.com/api/docs/guides/reasoning), [Claude manual thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)
+
+Higher effort may increase latency and cost. The app allows 4,096 output tokens for Minimal, 8,192 for Low, 16,384 for Medium, and 32,768 for High / Extra high / Maximum, including thinking. Manual Claude thinking gets its budget plus 2,048 output tokens; Provider default and Off retain the original 2,048-token limit. These are ceilings, not guaranteed usage. Explicit thinking requests have a 300-second read timeout and 360-second total request timeout, and remain cancellable using Stop.
 
 ## Caching and cost
 

@@ -12,6 +12,52 @@ class AgentCoreTest {
         ProviderClient.parse(provider, obj("content" to arr(obj("type" to "tool_use", "id" to "call-1", "name" to "observe", "input" to obj())), "usage" to obj("input_tokens" to 20, "cache_read_input_tokens" to 100, "cache_creation_input_tokens" to 30, "output_tokens" to 10)))
     else ProviderClient.parse(provider, obj("choices" to arr(obj("message" to obj("role" to "assistant", "content" to null, "tool_calls" to arr(obj("id" to "call-1", "type" to "function", "function" to obj("name" to "observe", "arguments" to "{}")))), "finish_reason" to "tool_calls")), "usage" to obj("prompt_tokens" to 150, "prompt_tokens_details" to obj("cached_tokens" to 100), "completion_tokens" to 10)))
 
+    @Test fun `reasoning controls omit provider defaults and send explicit effort without changing context`() {
+        for(provider in listOf("openai","anthropic")) {
+            val c=Conversation(provider).apply { addUser("Do the task") }
+            val config=ProviderConfig(provider=provider,model="claude-sonnet-4-6",apiKey="test")
+            val original=c.request(config)
+            assertFalse(original.has("reasoning_effort")); assertFalse(original.has("thinking")); assertFalse(original.has("output_config"))
+            assertEquals(2048,original.getInt(if(provider=="openai") "max_completion_tokens" else "max_tokens"))
+            for(level in ProviderConfig.reasoningLevels(provider).filterNot { it=="default" }) {
+                val conf=config.copy(reasoning=level); conf.validate()
+                val request=c.request(conf)
+                assertEquals(original.getJSONArray("messages").toString(),request.getJSONArray("messages").toString())
+                assertEquals(original.getJSONArray("tools").toString(),request.getJSONArray("tools").toString())
+                if(provider=="openai") assertEquals(level,request.getString("reasoning_effort"))
+                else if(level=="none") { assertEquals("disabled",request.getJSONObject("thinking").getString("type")); assertFalse(request.has("output_config")) }
+                else { assertEquals("adaptive",request.getJSONObject("thinking").getString("type")); assertEquals(level,request.getJSONObject("output_config").getString("effort")) }
+                if(level!="none") assertTrue(conf.outputLimit>2048)
+            }
+        }
+        try { ProviderConfig(apiKey="test",reasoning="invalid").validate(); fail("Invalid level accepted") } catch(_:IllegalArgumentException) {}
+    }
+    @Test fun `legacy Claude thinking uses bounded budgets below output ceiling`() {
+        for(model in listOf("claude-sonnet-4-20250514","claude-opus-4-1-20250805","claude-opus-4-5","claude-haiku-4-5-20251001","claude-3-7-sonnet-latest")) {
+            for(level in listOf("low","medium","high")) {
+                val config=ProviderConfig(provider="anthropic",model=model,reasoning=level,apiKey="test")
+                config.validate()
+                val request=Conversation("anthropic").request(config)
+                val thinking=request.getJSONObject("thinking")
+                assertEquals("enabled",thinking.getString("type"))
+                assertTrue(thinking.getInt("budget_tokens")>=1024)
+                assertTrue(thinking.getInt("budget_tokens")<request.getInt("max_tokens"))
+                if(model.startsWith("claude-opus-4-5")) assertEquals(level,request.getJSONObject("output_config").getString("effort"))
+                else assertFalse(request.has("output_config"))
+            }
+            try { ProviderConfig(provider="anthropic",model=model,reasoning="max",apiKey="test").validate(); fail("Unsupported legacy effort") } catch(_:IllegalArgumentException) {}
+        }
+    }
+    @Test fun `signed Claude thinking blocks survive tool continuations without appearing as chat text`() {
+        val blocks=arr(obj("type" to "thinking","thinking" to "private reasoning fixture","signature" to "signed-fixture"),obj("type" to "text","text" to "Checking now"),obj("type" to "tool_use","id" to "t1","name" to "observe","input" to obj()))
+        val reply=ProviderClient.parse("anthropic",obj("content" to blocks,"stop_reason" to "tool_use"))
+        assertEquals("Checking now",reply.text)
+        val c=Conversation("anthropic").apply { addUser("Check"); addAssistant(reply); addResult(reply.calls.single(),ToolOutput(obj("ok" to true))) }
+        val request=c.request(ProviderConfig(provider="anthropic",model="claude-sonnet-4-6",reasoning="high"))
+        assertEquals(blocks.toString(),request.getJSONArray("messages").getJSONObject(1).getJSONArray("content").toString())
+        assertEquals("ephemeral",request.getJSONObject("cache_control").getString("type"))
+    }
+
     @Test fun `attachments use native provider blocks and survive followups unchanged`() {
         val attachments=listOf(
             AttachmentInput(Attachment("image","photo.jpg","image/jpeg",3),"YWJj"),

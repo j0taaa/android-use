@@ -382,7 +382,7 @@ class MainActivity : Activity() {
             Attachments.forgetDraft(draftKey); renderAttachments(); composer.setText(""); draft=""; hideKeyboard(); return
         }
         val task=composer.text.toString().trim(); if(task.isBlank() && attachmentIds.isEmpty()) return
-        val config=Stores.config()
+        val config=Stores.config().let { c -> selected?.let { c.copy(reasoning=it.reasoning) } ?: c }
         try { config.validate() } catch(_:Exception) { draft=task; showSettings(); toast("Add your API connection to start chatting."); return }
         if(!Stores.consented() || PhoneAccessibilityService.instance==null) { disclosure(); return }
         selected?.let { s ->
@@ -433,6 +433,17 @@ class MainActivity : Activity() {
         val endpoint = field("https://api.openai.com/v1", c.endpoint); content.fill(endpoint); content.gap(14)
         content.fill(label("Model ID", 13f, Palette.muted)); content.gap(6)
         val model = field("Model ID", c.model); content.fill(model); content.gap(14)
+        content.fill(label("Reasoning level", 13f, Palette.muted))
+        val reasoning=Spinner(this).apply { contentDescription="Reasoning level" }
+        var reasoningValues=ProviderConfig.reasoningLevels(c.provider)
+        fun setReasoningOptions(chosenProvider: String, value: String) {
+            reasoningValues=ProviderConfig.reasoningLevels(chosenProvider)
+            reasoning.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,reasoningValues.map(ProviderConfig::reasoningLabel))
+            reasoning.setSelection(reasoningValues.indexOf(value).coerceAtLeast(0))
+        }
+        setReasoningOptions(c.provider,c.reasoning)
+        content.fill(reasoning)
+        content.fill(label("For new chats. Higher levels may take longer and cost more. Available levels depend on the model.",12f,Palette.muted)); content.gap(14)
         content.fill(label("API key", 13f, Palette.muted)); content.gap(6)
         val key = field(if(c.apiKey.isNotBlank()) "Saved securely · leave blank to keep" else "Paste your API key", secret = true); content.fill(key); content.gap(6)
         content.gap(12)
@@ -441,6 +452,7 @@ class MainActivity : Activity() {
             override fun onNothingSelected(parent: AdapterView<*>?) {}
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (initial) { initial = false; return }
+                setReasoningOptions(if(position==1) "anthropic" else "openai", "default")
                 endpoint.setText(if(position == 1) "https://api.anthropic.com/v1" else "https://api.openai.com/v1")
                 model.setText(if(position == 1) "claude-sonnet-4-6" else "gpt-4.1-mini")
             }
@@ -456,7 +468,7 @@ class MainActivity : Activity() {
             check(AgentService.current == null) { "Stop the active task before changing its connection." }
             val chosen = if(provider.selectedItemPosition == 1) "anthropic" else "openai"
             val existingKey = if(chosen == c.provider && endpoint.text.toString().trim().trimEnd('/') == c.endpoint.trimEnd('/')) c.apiKey else ""
-            val next = ProviderConfig(chosen, endpoint.text.toString().trim(), model.text.toString().trim(), key.text.toString().trim().ifBlank { existingKey }, steps.text.toString().toIntOrNull() ?: 24, tokens.text.toString().toIntOrNull() ?: ProviderConfig.DEFAULT_INPUT_TOKENS, screenshots.isChecked)
+            val next = ProviderConfig(chosen, endpoint.text.toString().trim(), model.text.toString().trim(), key.text.toString().trim().ifBlank { existingKey }, steps.text.toString().toIntOrNull() ?: 24, tokens.text.toString().toIntOrNull() ?: ProviderConfig.DEFAULT_INPUT_TOKENS, screenshots.isChecked, reasoningValues[reasoning.selectedItemPosition])
             Stores.saveConfig(next); return next
         }
         content.fill(action("Save", true) { try { save(); toast("Settings saved"); showChat() } catch (e: Exception) { toast(e.message.orEmpty()) } }); content.gap(10)
@@ -471,7 +483,7 @@ class MainActivity : Activity() {
             } catch (e: Exception) { toast(e.message.orEmpty()) }
         }
         content.fill(test); content.gap(6)
-        content.fill(label("Testing sends one short model request and may incur a small API charge.", 12f, Palette.muted)); content.gap(22)
+        content.fill(label("Testing sends one model request using these settings and may incur an API charge.", 12f, Palette.muted)); content.gap(22)
         content.fill(action("Accessibility setup") { disclosure() }); content.gap(10)
         content.fill(action("Open practice notepad") { startActivity(Intent(this, PracticeActivity::class.java)) }); content.gap(10)
         content.fill(action("Remove saved API key") { if(AgentService.current == null) { Stores.removeKey(); toast("API key removed."); showSettings() } else toast("Stop the task first.") }); content.gap(20)
@@ -485,7 +497,7 @@ class MainActivity : Activity() {
     }
     private fun showSession(s: Session) {
         val report = buildString {
-            append("${s.task}\n\n${s.status} · ${s.model}\n${s.step} steps\nInput: ${s.input} · Cache reads: ${s.cached} · Cache writes: ${s.cacheWrite} · Output: ${s.output}\n\n")
+            append("${s.task}\n\n${s.status} · ${s.model}\nReasoning: ${ProviderConfig.reasoningLabel(s.reasoning)}\n${s.step} steps\nInput: ${s.input} · Cache reads: ${s.cached} · Cache writes: ${s.cacheWrite} · Output: ${s.output}\n\n")
             s.events.forEach { append("${it.kind.uppercase()} ${it.state}\n${it.text}\n"); if(it.details.isNotBlank()) append("${it.details}\n"); append("\n") }
             if (s.pending != null) append("An action has an uncertain outcome. Check the phone before repeating it.\n")
         }

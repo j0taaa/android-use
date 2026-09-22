@@ -70,6 +70,7 @@ class Session(val task: String, val id: String = UUID.randomUUID().toString(), v
     var provider = ""
     var model = ""
     var endpoint = ""
+    var reasoning = "default"
     var pending: JSONObject? = null
     var conversation = Conversation("openai")
     val events = CopyOnWriteArrayList<RunEvent>()
@@ -98,12 +99,13 @@ class Session(val task: String, val id: String = UUID.randomUUID().toString(), v
     }
     fun json() = obj("id" to id, "task" to task, "started" to started, "status" to status, "summary" to summary,
         "step" to step, "input" to input, "cached" to cached, "output" to output, "cacheWrite" to cacheWrite,
-        "provider" to provider, "model" to model, "endpoint" to endpoint, "pending" to pending, "messages" to conversation.messages,
+        "provider" to provider, "model" to model, "endpoint" to endpoint, "reasoning" to reasoning, "pending" to pending, "messages" to conversation.messages,
         "events" to JSONArray().also { a -> events.forEach { a.put(obj("kind" to it.kind, "text" to it.text, "time" to it.time, "details" to it.details, "state" to it.state, "attachments" to JSONArray(it.attachments.map { a -> a.json() }))) } })
     companion object {
         fun from(j: JSONObject, transcript: Boolean = false): Session = Session(j.getString("task"), j.getString("id"), j.getLong("started")).apply {
             status = j.getString("status"); summary = j.optString("summary"); step = j.optInt("step")
             input = j.optInt("input"); cached = j.optInt("cached"); output = j.optInt("output"); cacheWrite = j.optInt("cacheWrite")
+            reasoning = j.optString("reasoning", "default")
             provider = j.optString("provider"); model = j.optString("model"); endpoint = j.optString("endpoint"); pending = j.optJSONObject("pending")
             // Loading history does not resume inference or retain all image payloads
             // from up to 40 old transcripts in the UI heap. The encrypted journal stays on disk.
@@ -139,12 +141,12 @@ object Stores {
         prefs.getString("provider", "openai")!!, prefs.getString("endpoint", "https://api.openai.com/v1")!!,
         prefs.getString("model", "gpt-4.1-mini")!!,
         prefs.getString("credential", null)?.let { try { Vault.decrypt(it) } catch (_: Exception) { "" } } ?: "",
-        prefs.getInt("steps", 24), prefs.getInt("tokens", ProviderConfig.DEFAULT_INPUT_TOKENS), prefs.getBoolean("screenshots", true))
+        prefs.getInt("steps", 24), prefs.getInt("tokens", ProviderConfig.DEFAULT_INPUT_TOKENS), prefs.getBoolean("screenshots", true), prefs.getString("reasoning", "default")!!)
     fun saveConfig(c: ProviderConfig) {
         c.validate()
         check(prefs.edit().putString("provider", c.provider).putString("endpoint", c.endpoint.trimEnd('/')).putString("model", c.model)
             .putString("credential", Vault.encrypt(c.apiKey)).putInt("steps", c.maxSteps).putInt("tokens", c.maxInputTokens)
-            .putBoolean("screenshots", c.allowScreenshots).commit()) { "Could not save settings." }
+            .putBoolean("screenshots", c.allowScreenshots).putString("reasoning", c.reasoning).commit()) { "Could not save settings." }
     }
     fun consented() = prefs.getBoolean("disclosure", false)
     fun consent() { prefs.edit().putBoolean("disclosure", true).apply() }

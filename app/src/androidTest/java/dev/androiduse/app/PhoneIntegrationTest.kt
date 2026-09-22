@@ -170,7 +170,7 @@ class PhoneIntegrationTest {
                 }
             }
             server.start()
-            Stores.saveConfig(ProviderConfig(provider="anthropic",endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="test-anthropic",model="scripted-anthropic"))
+            Stores.saveConfig(ProviderConfig(provider="anthropic",endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="test-anthropic",model="claude-sonnet-4-6",reasoning="medium"))
             inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Ask me which note to save")) }
             waitUntil { AppState.session?.status=="WAITING" }
             assertEquals(1,server.requestCount)
@@ -187,6 +187,8 @@ class PhoneIntegrationTest {
             waitUntil { AppState.session?.status=="COMPLETE" }
             assertEquals(2,requests.size)
             assertEquals("ephemeral",requests[1].getJSONObject("cache_control").getString("type"))
+            requests.forEach { assertEquals("adaptive",it.getJSONObject("thinking").getString("type")); assertEquals("medium",it.getJSONObject("output_config").getString("effort")); assertEquals(16384,it.getInt("max_tokens")) }
+            assertEquals("medium",Stores.loadSession(AppState.session!!.id)!!.reasoning)
             val first=requests[0].getJSONArray("messages"); val second=requests[1].getJSONArray("messages")
             for(i in 0 until first.length()) assertEquals(first.get(i).toString(),second.get(i).toString())
             assertTrue(second.toString().contains("Meeting notes"))
@@ -532,6 +534,66 @@ class PhoneIntegrationTest {
                 assertTrue(after.toString().contains("Pack passport and sunglasses."))
             }
         } finally { device.unfreezeRotation(); context.contentResolver.delete(photo,null,null); context.contentResolver.delete(notes,null,null) }
+    }
+
+    @Test fun reasoningSettingPersistsAndEachChatKeepsItsEffort() {
+        Stores.clearHistory()
+        val device=androidx.test.uiautomator.UiDevice.getInstance(inst)
+        fun find(selector: androidx.test.uiautomator.BySelector): androidx.test.uiautomator.UiObject2 =
+            device.wait(androidx.test.uiautomator.Until.findObject(selector),7000) ?: error("Missing $selector")
+        MockWebServer().use { server ->
+            repeat(3) { server.enqueue(response(it,"finish",obj("summary" to "Reasoning reply $it", "success" to true))) }
+            val config=ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="reasoning-test",model="reasoning-fixture")
+            if(android.os.Build.VERSION.SDK_INT>=33) shell("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
+            Stores.saveConfig(config)
+            assertEquals("default",Stores.config().reasoning)
+            inst.startActivitySync(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+            inst.waitForIdleSync(); device.waitForIdle()
+            find(androidx.test.uiautomator.By.desc("Open chat history")).click()
+            find(androidx.test.uiautomator.By.desc("Open settings")).click()
+            find(androidx.test.uiautomator.By.desc("Reasoning level")).click()
+            find(androidx.test.uiautomator.By.text("High")).click()
+            device.waitForIdle()
+            device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"reasoning-settings.png"))
+            androidx.test.uiautomator.UiScrollable(androidx.test.uiautomator.UiSelector().scrollable(true)).scrollTextIntoView("Save")
+            find(androidx.test.uiautomator.By.text("Save")).click()
+            find(androidx.test.uiautomator.By.text("How can I help?"))
+            device.waitForIdle()
+            assertEquals("high",Stores.config().reasoning)
+            assertEquals("high",context.getSharedPreferences("settings",0).getString("reasoning",null))
+            find(androidx.test.uiautomator.By.desc("Message")).text="Check reasoning setting"
+            device.waitForIdle()
+            find(androidx.test.uiautomator.By.desc("Send message")).click()
+            try { waitUntil { AppState.session?.summary=="Reasoning reply 0" && AgentService.current==null } }
+            catch(e: AssertionError) {
+                device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"reasoning-failure.png"))
+                throw AssertionError("Reasoning start: status=${AppState.session?.status}, summary=${AppState.session?.summary}, requests=${server.requestCount}",e)
+            }
+            val session=Stores.loadSession(AppState.session!!.id)!!
+            assertEquals("high",session.reasoning)
+            val first=JSONObject(server.takeRequest(5,TimeUnit.SECONDS)!!.body.readUtf8())
+            assertEquals("high",first.getString("reasoning_effort"))
+            assertEquals(32768,first.getInt("max_completion_tokens"))
+            val before=session.conversation.request(Stores.config()).getJSONArray("messages")
+            Stores.saveConfig(Stores.config().copy(reasoning="low"))
+            find(androidx.test.uiautomator.By.desc("Message")).text="Keep the same chat"
+            find(androidx.test.uiautomator.By.desc("Send message")).click()
+            waitUntil { AppState.session?.summary=="Reasoning reply 1" && AgentService.current==null }
+            val followup=JSONObject(server.takeRequest(5,TimeUnit.SECONDS)!!.body.readUtf8())
+            assertEquals("high",followup.getString("reasoning_effort"))
+            for(i in 0 until before.length()) assertEquals(before.get(i).toString(),followup.getJSONArray("messages").get(i).toString())
+            find(androidx.test.uiautomator.By.desc("New chat")).click()
+            find(androidx.test.uiautomator.By.text("How can I help?"))
+            find(androidx.test.uiautomator.By.desc("Message")).text="Use the new reasoning setting"
+            find(androidx.test.uiautomator.By.desc("Send message")).click()
+            waitUntil { AppState.session?.summary=="Reasoning reply 2" && AgentService.current==null }
+            val next=JSONObject(server.takeRequest(5,TimeUnit.SECONDS)!!.body.readUtf8())
+            assertEquals("low",next.getString("reasoning_effort"))
+            assertEquals(8192,next.getInt("max_completion_tokens"))
+            assertNotEquals(session.id,AppState.session!!.id)
+            val legacy=session.json().apply { remove("reasoning") }
+            assertEquals("default",Session.from(legacy,true).reasoning)
+        }
     }
 
 }
