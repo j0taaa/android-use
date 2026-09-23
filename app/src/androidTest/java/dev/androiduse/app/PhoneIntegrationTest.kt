@@ -43,7 +43,6 @@ class PhoneIntegrationTest {
         shell("wm dismiss-keyguard")
         waitUntil { PhoneAccessibilityService.instance != null }
         Stores.consent()
-        Stores.setAutoDisablePhoneControl(false)
         if(android.os.Build.VERSION.SDK_INT>=33) shell("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
         launchPractice()
     }
@@ -647,36 +646,42 @@ class PhoneIntegrationTest {
         }
     }
 
-    @Test fun optionalAutomaticDisconnectStillRunsAfterWorkerCancellation() {
-        Stores.setAutoDisablePhoneControl(true)
+    @Test fun stoppingKeepsControlEnabledDespiteLegacyAutoOffPreference() {
+        val legacy = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+        legacy.edit().putBoolean("auto_disable_phone_control",true).commit()
         try {
             MockWebServer().use { server ->
                 server.enqueue(response(0,"open_app",obj("package_name" to "com.android.settings")).setBodyDelay(2,TimeUnit.SECONDS))
                 Stores.saveConfig(ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="auto-stop-test",model="auto-stop-fixture"))
-                inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Stop and release phone control")) }
+                inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Stop without revoking phone control")) }
                 assertNotNull(server.takeRequest(10,TimeUnit.SECONDS))
                 AgentService.current!!.stopRun()
-                waitUntil { AgentService.current==null && !PhoneAccessibilityService.isEnabled(context) }
+                waitUntil { AgentService.current==null }
                 assertEquals("STOPPED",Stores.loadSession(AppState.session!!.id)!!.status)
-                assertNull(PhoneAccessibilityService.instance)
+                assertTrue(PhoneAccessibilityService.isEnabled(context))
+                assertNotNull(PhoneAccessibilityService.instance)
+                assertTrue(phone.observe().toString().contains("Your practice note"))
                 waitUntil { context.getSystemService(android.app.NotificationManager::class.java).activeNotifications.none { it.id==72 } }
             }
-        } finally { Stores.setAutoDisablePhoneControl(false) }
+        } finally { legacy.edit().remove("auto_disable_phone_control").commit() }
     }
 
-    @Test fun optionalAutomaticDisconnectRevokesAccessAfterCompletion() {
-        Stores.setAutoDisablePhoneControl(true)
+    @Test fun completionKeepsControlEnabledDespiteLegacyAutoOffPreference() {
+        val legacy = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+        legacy.edit().putBoolean("auto_disable_phone_control",true).commit()
         try {
             MockWebServer().use { server ->
-                server.enqueue(response(0,"finish",obj("summary" to "Completed before disconnecting", "success" to true)))
+                server.enqueue(response(0,"finish",obj("summary" to "Completed with control available", "success" to true)))
                 Stores.saveConfig(ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="auto-off-test",model="auto-off-fixture"))
-                inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Complete and release phone control")) }
-                waitUntil { AppState.session?.summary=="Completed before disconnecting" && AgentService.current==null && !PhoneAccessibilityService.isEnabled(context) }
+                inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Complete without revoking phone control")) }
+                waitUntil { AppState.session?.summary=="Completed with control available" && AgentService.current==null }
                 assertEquals("COMPLETE",Stores.loadSession(AppState.session!!.id)!!.status)
-                assertNull(PhoneAccessibilityService.instance)
+                assertTrue(PhoneAccessibilityService.isEnabled(context))
+                assertNotNull(PhoneAccessibilityService.instance)
+                assertTrue(phone.observe().toString().contains("Your practice note"))
                 waitUntil { context.getSystemService(android.app.NotificationManager::class.java).activeNotifications.none { it.id==72 } }
             }
-        } finally { Stores.setAutoDisablePhoneControl(false) }
+        } finally { legacy.edit().remove("auto_disable_phone_control").commit() }
     }
 
 }

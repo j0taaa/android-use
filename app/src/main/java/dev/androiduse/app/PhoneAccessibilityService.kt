@@ -51,9 +51,9 @@ class PhoneAccessibilityService : AccessibilityService() {
         if(!wasDisabled) AgentService.current?.stopRun("Accessibility disconnected.")
         AppState.changed(); super.onDestroy()
     }
-    fun turnOff(cancelAgent: Boolean = true) = onMain {
+    fun turnOff() = onMain {
         disabled=true
-        if(cancelAgent) AgentService.current?.stopRun("Phone control turned off.")
+        AgentService.current?.stopRun("Phone control turned off.")
         snapshot=null; overlay?.close(); overlay=null
         disableSelf() // Revoke the enabled service in Android; a paused task keeps this permission.
         if(instance===this) instance=null

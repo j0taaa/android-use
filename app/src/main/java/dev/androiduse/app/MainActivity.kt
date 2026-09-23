@@ -524,10 +524,6 @@ class MainActivity : Activity() {
         phoneControlStatus=label("",13f,Palette.muted).also { content.fill(it) }; content.gap(8)
         phoneControlButton=action("Turn off phone control") { turnOffPhoneControl() }.also { content.fill(it) }; content.gap(8)
         content.fill(label("Stops the agent and turns off Accessibility access. Some banking apps may still block installed automation apps.",12f,Palette.muted)); content.gap(12)
-        val autoOff=Switch(this).apply { text="Turn off after each task"; textSize=14f; setTextColor(Palette.ink); isChecked=Stores.autoDisablePhoneControl() }
-        autoOff.setOnCheckedChangeListener { view, checked -> view.haptic(); Stores.setAutoDisablePhoneControl(checked) }
-        content.fill(autoOff)
-        content.fill(label("Re-enable phone control in Android Accessibility settings before the next task.",12f,Palette.muted)); content.gap(10)
         updatePhoneControlStatus()
         content.fill(action("Accessibility setup") { disclosure() }); content.gap(10)
         content.fill(action("Open practice notepad") { startActivity(Intent(this, PracticeActivity::class.java)) }); content.gap(10)
