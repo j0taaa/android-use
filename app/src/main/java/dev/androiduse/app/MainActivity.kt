@@ -26,6 +26,8 @@ class MainActivity : Activity() {
     companion object { @Volatile var visible = false; private set }
     private var selected: Session? = null
     private var awaitingStart = false
+    private var phoneControlButton: Button? = null
+    private var phoneControlStatus: TextView? = null
     private var page = "Chat"
     private var draft = ""
     private lateinit var root: LinearLayout
@@ -59,7 +61,8 @@ class MainActivity : Activity() {
     private val listener: () -> Unit = {
         val active=AppState.session
         if (awaitingStart || (selected != null && active?.id == selected?.id)) { selected=active; awaitingStart=false }
-        if(page=="Chat" && !switching) updateChat()
+        if(page=="Chat" && !switching) { updateChat(); if(::drawer.isInitialized && drawer.isOpen) populateHistory() }
+        if(page=="Settings") updatePhoneControlStatus()
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -275,7 +278,8 @@ class MainActivity : Activity() {
     private fun populateHistory() {
         val sessions=historySessions.toMutableList()
         AppState.session?.let { active -> sessions.removeAll { it.id==active.id }; sessions.add(0,active) }
-        val rows=sessions.map { "${it.id}:${it.task}:${it.started}" } + "selected:${selected?.id}"
+        val controlEnabled=PhoneAccessibilityService.isEnabled(this)
+        val rows=sessions.map { "${it.id}:${it.task}:${it.started}" } + "selected:${selected?.id}:control:$controlEnabled"
         if(rows==historyRows) return
         historyRows=rows
         history.removeAllViews()
@@ -298,6 +302,9 @@ class MainActivity : Activity() {
         }
         if(sessions.isEmpty()) list.fill(label("No chats yet",14f,Palette.muted).apply { setPadding(dp(12),dp(16),0,0) })
         history.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(list) },LinearLayout.LayoutParams(-1,0,1f))
+        history.fill(action(if(controlEnabled) "Turn off phone control" else "Phone control is off") {
+            if(PhoneAccessibilityService.isEnabled(this)) turnOffPhoneControl() else disclosure()
+        }.apply { contentDescription=if(controlEnabled) "Turn off phone control" else "Phone control is off. Open accessibility setup" })
         val settings=row().apply { setPadding(0,dp(8),0,0); isClickable=true; isFocusable=true; contentDescription="Settings"; setOnClickListener { haptic(); showSettings() } }
         settings.addView(ChatIcon(this,"settings","Open settings") { showSettings() },LinearLayout.LayoutParams(dp(48),dp(48)))
         settings.addView(label("Settings",16f,Palette.ink,true)); history.fill(settings)
@@ -422,6 +429,35 @@ class MainActivity : Activity() {
         if (multiline) { minLines = 1; maxLines = 6; gravity = Gravity.TOP } else isSingleLine = true
         importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
     }
+    private fun updatePhoneControlStatus() {
+        val enabled=PhoneAccessibilityService.isEnabled(this)
+        phoneControlStatus?.text=if(enabled) "Phone control is on" else "Phone control is off"
+        phoneControlButton?.isEnabled=enabled || AgentService.current!=null
+    }
+    private fun turnOffPhoneControl() {
+        val service=PhoneAccessibilityService.instance
+        AgentService.current?.stopRun("Phone control turned off.")
+        if(service==null && PhoneAccessibilityService.isEnabled(this)) {
+            toast("Turn off Android Use in Android Accessibility settings.")
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)); return
+        }
+        try { service?.turnOff() } catch(_: Exception) {
+            toast("Turn off Android Use in Android Accessibility settings.")
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)); return
+        }
+        // Android updates its enabled-service list asynchronously. Only report off once verified.
+        fun refresh(attempt: Int) {
+            if(isDestroyed) return
+            val enabled=PhoneAccessibilityService.isEnabled(this)
+            if(page=="Settings") updatePhoneControlStatus() else if(drawer.isOpen) populateHistory()
+            if(enabled && attempt<20) root.postDelayed({ refresh(attempt+1) },150)
+            else if(enabled) {
+                toast("Check that Android Use is off in Accessibility settings.")
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            } else toast("Phone control is off. You can re-enable it in Android Accessibility settings.")
+        }
+        refresh(0)
+    }
     private fun settings() {
         val c = Stores.config()
         val provider = Spinner(this).apply {
@@ -484,6 +520,15 @@ class MainActivity : Activity() {
         }
         content.fill(test); content.gap(6)
         content.fill(label("Testing sends one model request using these settings and may incur an API charge.", 12f, Palette.muted)); content.gap(22)
+        content.fill(label("Phone control",16f,Palette.ink,true)); content.gap(8)
+        phoneControlStatus=label("",13f,Palette.muted).also { content.fill(it) }; content.gap(8)
+        phoneControlButton=action("Turn off phone control") { turnOffPhoneControl() }.also { content.fill(it) }; content.gap(8)
+        content.fill(label("Stops the agent and turns off Accessibility access. Some banking apps may still block installed automation apps.",12f,Palette.muted)); content.gap(12)
+        val autoOff=Switch(this).apply { text="Turn off after each task"; textSize=14f; setTextColor(Palette.ink); isChecked=Stores.autoDisablePhoneControl() }
+        autoOff.setOnCheckedChangeListener { view, checked -> view.haptic(); Stores.setAutoDisablePhoneControl(checked) }
+        content.fill(autoOff)
+        content.fill(label("Re-enable phone control in Android Accessibility settings before the next task.",12f,Palette.muted)); content.gap(10)
+        updatePhoneControlStatus()
         content.fill(action("Accessibility setup") { disclosure() }); content.gap(10)
         content.fill(action("Open practice notepad") { startActivity(Intent(this, PracticeActivity::class.java)) }); content.gap(10)
         content.fill(action("Remove saved API key") { if(AgentService.current == null) { Stores.removeKey(); toast("API key removed."); showSettings() } else toast("Stop the task first.") }); content.gap(20)

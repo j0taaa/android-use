@@ -148,6 +148,8 @@ object Stores {
             .putString("credential", Vault.encrypt(c.apiKey)).putInt("steps", c.maxSteps).putInt("tokens", c.maxInputTokens)
             .putBoolean("screenshots", c.allowScreenshots).putString("reasoning", c.reasoning).commit()) { "Could not save settings." }
     }
+    fun autoDisablePhoneControl() = prefs.getBoolean("auto_disable_phone_control", false)
+    fun setAutoDisablePhoneControl(enabled: Boolean) { prefs.edit().putBoolean("auto_disable_phone_control",enabled).apply() }
     fun consented() = prefs.getBoolean("disclosure", false)
     fun consent() { prefs.edit().putBoolean("disclosure", true).apply() }
     fun removeKey() { prefs.edit().remove("credential").commit() }

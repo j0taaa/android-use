@@ -43,6 +43,8 @@ class PhoneIntegrationTest {
         shell("wm dismiss-keyguard")
         waitUntil { PhoneAccessibilityService.instance != null }
         Stores.consent()
+        Stores.setAutoDisablePhoneControl(false)
+        if(android.os.Build.VERSION.SDK_INT>=33) shell("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
         launchPractice()
     }
     @After fun cleanup() {
@@ -594,6 +596,87 @@ class PhoneIntegrationTest {
             val legacy=session.json().apply { remove("reasoning") }
             assertEquals("default",Session.from(legacy,true).reasoning)
         }
+    }
+
+    @Test fun turnOffFromDrawerRevokesAccessibilityWithoutDeletingData() {
+        val oldService=phone
+        assertTrue(PhoneAccessibilityService.isEnabled(context))
+        val config=ProviderConfig(apiKey="disable-control-test")
+        Stores.saveConfig(config)
+        val saved=Session("Keep this conversation").apply { status="COMPLETE"; log("user",task); log("result","Saved on this phone") }
+        Stores.saveSession(saved)
+        val device=androidx.test.uiautomator.UiDevice.getInstance(inst)
+        fun find(selector: androidx.test.uiautomator.BySelector) = device.wait(androidx.test.uiautomator.Until.findObject(selector),7000) ?: error("Missing $selector")
+        inst.startActivitySync(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        inst.waitForIdleSync(); device.waitForIdle()
+        find(androidx.test.uiautomator.By.desc("Open chat history")).click()
+        find(androidx.test.uiautomator.By.text("Turn off phone control")).click()
+        waitUntil { PhoneAccessibilityService.instance==null && !PhoneAccessibilityService.isEnabled(context) }
+        assertFalse(shell("settings get secure enabled_accessibility_services").contains("${context.packageName}/dev.androiduse.app.PhoneAccessibilityService"))
+        find(androidx.test.uiautomator.By.text("Phone control is off"))
+        device.takeScreenshot(java.io.File(context.getExternalFilesDir(null),"phone-control-off.png"))
+        assertEquals("Saved on this phone",Stores.loadSession(saved.id)!!.events.last().text)
+        assertEquals(config.apiKey,Stores.config().apiKey)
+        try { oldService.execute("navigate",obj("action" to "home")) { false }; fail("Disabled service accepted an action") } catch(_:IllegalArgumentException) {}
+        try { oldService.observe(); fail("Disabled service read a screen") } catch(_:Exception) {}
+        oldService.showControls(); device.waitForIdle()
+        assertFalse(device.hasObject(androidx.test.uiautomator.By.desc("Pause or resume agent")))
+        inst.startActivitySync(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        inst.waitForIdleSync(); device.waitForIdle()
+        assertFalse("Reopening must not re-enable control",PhoneAccessibilityService.isEnabled(context))
+    }
+
+    @Test fun disablingControlCancelsInferenceAndPreventsLatePhoneActions() {
+        val oldService=phone
+        MockWebServer().use { server ->
+            server.enqueue(response(0,"open_app",obj("package_name" to "com.android.settings")).setBodyDelay(2,TimeUnit.SECONDS))
+            Stores.saveConfig(ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="off-test",model="disable-fixture"))
+            inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Disable while thinking")) }
+            assertNotNull(server.takeRequest(10,TimeUnit.SECONDS))
+            oldService.turnOff()
+            waitUntil { AgentService.current==null && PhoneAccessibilityService.instance==null && !PhoneAccessibilityService.isEnabled(context) }
+            assertEquals("STOPPED",AppState.session!!.status)
+            assertEquals(1,server.requestCount)
+            Thread.sleep(2300)
+            val device=androidx.test.uiautomator.UiDevice.getInstance(inst)
+            assertTrue(device.hasObject(androidx.test.uiautomator.By.text("Your practice note")))
+            assertFalse(device.hasObject(androidx.test.uiautomator.By.desc("Pause or resume agent")))
+            // Notification removal is asynchronous on Android 11.
+            waitUntil { context.getSystemService(android.app.NotificationManager::class.java).activeNotifications.none { it.id==72 } }
+            try { oldService.execute("open_app",obj("package_name" to "com.android.settings")) { false }; fail("Old service reference launched an app") } catch(_:IllegalArgumentException) {}
+        }
+    }
+
+    @Test fun optionalAutomaticDisconnectStillRunsAfterWorkerCancellation() {
+        Stores.setAutoDisablePhoneControl(true)
+        try {
+            MockWebServer().use { server ->
+                server.enqueue(response(0,"open_app",obj("package_name" to "com.android.settings")).setBodyDelay(2,TimeUnit.SECONDS))
+                Stores.saveConfig(ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="auto-stop-test",model="auto-stop-fixture"))
+                inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Stop and release phone control")) }
+                assertNotNull(server.takeRequest(10,TimeUnit.SECONDS))
+                AgentService.current!!.stopRun()
+                waitUntil { AgentService.current==null && !PhoneAccessibilityService.isEnabled(context) }
+                assertEquals("STOPPED",Stores.loadSession(AppState.session!!.id)!!.status)
+                assertNull(PhoneAccessibilityService.instance)
+                waitUntil { context.getSystemService(android.app.NotificationManager::class.java).activeNotifications.none { it.id==72 } }
+            }
+        } finally { Stores.setAutoDisablePhoneControl(false) }
+    }
+
+    @Test fun optionalAutomaticDisconnectRevokesAccessAfterCompletion() {
+        Stores.setAutoDisablePhoneControl(true)
+        try {
+            MockWebServer().use { server ->
+                server.enqueue(response(0,"finish",obj("summary" to "Completed before disconnecting", "success" to true)))
+                Stores.saveConfig(ProviderConfig(endpoint=server.url("/v1").toString().trimEnd('/'),apiKey="auto-off-test",model="auto-off-fixture"))
+                inst.runOnMainSync { context.startForegroundService(Intent(context,AgentService::class.java).setAction(AgentService.START).putExtra("task","Complete and release phone control")) }
+                waitUntil { AppState.session?.summary=="Completed before disconnecting" && AgentService.current==null && !PhoneAccessibilityService.isEnabled(context) }
+                assertEquals("COMPLETE",Stores.loadSession(AppState.session!!.id)!!.status)
+                assertNull(PhoneAccessibilityService.instance)
+                waitUntil { context.getSystemService(android.app.NotificationManager::class.java).activeNotifications.none { it.id==72 } }
+            }
+        } finally { Stores.setAutoDisablePhoneControl(false) }
     }
 
 }

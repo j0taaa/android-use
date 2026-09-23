@@ -1,6 +1,6 @@
 # Android Use
 
-[Download the signed v0.5.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.5.0/android-use-0.5.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
+[Download the signed v0.6.0 APK](https://github.com/j0taaa/android-use/releases/download/v0.6.0/android-use-0.6.0.apk) · [Releases](https://github.com/j0taaa/android-use/releases) · [Installation page](https://android-use.jaypussy.site)
 
 GitHub release downloads do not depend on a development computer. The installation-page mirror requires its hosting PC to stay online.
 
@@ -49,6 +49,16 @@ References: [OpenAI file input formats](https://developers.openai.com/api/docs/g
 6. Use the floating controls or persistent notification to pause or stop. Open the app to answer an agent question. A dispatched gesture may complete, but stopping cancels inference and blocks later dispatches.
 
 The release APK contains no API key or predefined test-provider configuration. Each user's configuration is local. HTTPS is required for remote endpoints. Loopback HTTP is supported for local providers and emulator development.
+
+## Turning off phone control and banking apps
+
+Open the drawer and tap **Turn off phone control**, or use the same button in Settings. This stops the task, cancels inference, removes the floating controls, and calls Android’s `disableSelf()` to revoke the enabled Accessibility service. The app checks Android’s enabled-service list before showing that control is off. Chats, attachments and API settings stay on your phone. Reopening Android Use does not re-enable control; you must explicitly enable it again in Android Accessibility settings.
+
+For automatic disconnection, enable **Settings → Turn off after each task**. This takes effect immediately and turns off access when a task finishes, fails, reaches a limit, or is stopped. Pausing or waiting for your reply keeps access enabled. This option starts off to preserve normal consecutive-task behavior. **Stop** alone cancels the task; use **Turn off phone control** to revoke access as well.
+
+Some banking apps refuse to run while another app has enabled screen-reading/control access. Android exposes capture, control and overlay risk signals; turning off access may resolve that kind of block. Other banks may reject an installed automation app even with its Accessibility service disabled. This update cannot guarantee acceptance by those banks, and compatibility with actual banking apps has not been verified. It does not conceal Android Use or change its identity or declared capabilities. If a bank still blocks it after access is off, follow that bank’s guidance; uninstalling may remain necessary.
+
+References: [Android app access risk verdicts](https://developer.android.com/google/play/integrity/verdicts#app-access-risk-verdict), [Android Accessibility service lifecycle and disableSelf](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#disableSelf()).
 
 ## Reasoning level
 

@@ -27,7 +27,13 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class PhoneAccessibilityService : AccessibilityService() {
-    companion object { @Volatile var instance: PhoneAccessibilityService? = null; private set }
+    companion object {
+        @Volatile var instance: PhoneAccessibilityService? = null; private set
+        fun isEnabled(context: android.content.Context): Boolean = context.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+            .getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            .any { it.resolveInfo.serviceInfo.let { service -> service.packageName==context.packageName && service.name==PhoneAccessibilityService::class.java.name } }
+    }
+    @Volatile private var disabled = false
     private val main = Handler(Looper.getMainLooper())
     private val sequence = AtomicInteger()
     @Volatile private var lastChange = 0L
@@ -37,9 +43,22 @@ class PhoneAccessibilityService : AccessibilityService() {
     data class Capture(val json: JSONObject, val nodes: Map<String, NodeRecord>, val hash: String, val window: Int, val pkg: String)
     data class Snapshot(val id: String, val capture: Capture, val time: Long)
 
-    override fun onServiceConnected() { instance = this; AppState.changed() }
+    override fun onServiceConnected() { disabled = false; instance = this; AppState.changed() }
     override fun onInterrupt() { AgentService.current?.pauseFor("Accessibility was interrupted.") }
-    override fun onDestroy() { hideControls(); instance = null; AgentService.current?.stopRun("Accessibility disconnected."); AppState.changed(); super.onDestroy() }
+    override fun onDestroy() {
+        val wasDisabled=disabled; disabled=true; hideControls()
+        if(instance===this) instance=null
+        if(!wasDisabled) AgentService.current?.stopRun("Accessibility disconnected.")
+        AppState.changed(); super.onDestroy()
+    }
+    fun turnOff(cancelAgent: Boolean = true) = onMain {
+        disabled=true
+        if(cancelAgent) AgentService.current?.stopRun("Phone control turned off.")
+        snapshot=null; overlay?.close(); overlay=null
+        disableSelf() // Revoke the enabled service in Android; a paused task keeps this permission.
+        if(instance===this) instance=null
+        AppState.changed()
+    }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) { if (event != null) lastChange = SystemClock.elapsedRealtime() }
     fun <T> onMain(block: () -> T): T {
         if (Looper.myLooper() == Looper.getMainLooper()) return block()
@@ -48,7 +67,7 @@ class PhoneAccessibilityService : AccessibilityService() {
         return try { task.get(8, TimeUnit.SECONDS) } catch (e: Exception) { task.cancel(false); throw IllegalStateException(e.cause?.message ?: "Phone control timed out") }
     }
     fun assertAvailable() {
-        require(instance === this) { "Enable Android Use in Accessibility settings." }
+        require(!disabled && instance === this) { "Enable Android Use in Accessibility settings." }
         require(!getSystemService(KeyguardManager::class.java).isKeyguardLocked) { "Unlock the phone before continuing." }
         require(getSystemService(PowerManager::class.java).isInteractive) { "Turn on the phone screen before continuing." }
     }
@@ -151,6 +170,7 @@ class PhoneAccessibilityService : AccessibilityService() {
         try {
             Thread.sleep(60) // Allow the overlay surface to leave the gesture's hit-test region.
             val accepted = onMain {
+                assertAvailable()
                 if (cancelled()) throw InterruptedException("Stopped")
                 require(!MainActivity.visible) { "The agent cannot gesture over its own controls." }
                 val path = Path().apply { moveTo(x1, y1); if (x1 != x2 || y1 != y2) lineTo(x2, y2) }
@@ -217,13 +237,14 @@ class PhoneAccessibilityService : AccessibilityService() {
                 ok = gesture(args.getDouble("x1").toFloat(), args.getDouble("y1").toFloat(), args.getDouble("x2").toFloat(), args.getDouble("y2").toFloat(), args.optLong("duration_ms", 400).coerceIn(100, 1500), cancelled)
             }
             "navigate" -> ok = onMain {
+                assertAvailable()
                 if (cancelled()) throw InterruptedException("Stopped")
                 performGlobalAction(when (args.getString("action")) { "back" -> GLOBAL_ACTION_BACK; "home" -> GLOBAL_ACTION_HOME; "recents" -> GLOBAL_ACTION_RECENTS; "notifications" -> GLOBAL_ACTION_NOTIFICATIONS; else -> error("Unsupported navigation") })
             }
             "open_app" -> {
                 val pkg = args.getString("package_name")
                 val intent = if (pkg == "android-use:practice") Intent(this, PracticeActivity::class.java) else packageManager.getLaunchIntentForPackage(pkg) ?: error("App is not launchable or not installed.")
-                onMain { if (cancelled()) throw InterruptedException("Stopped"); startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                onMain { assertAvailable(); if (cancelled()) throw InterruptedException("Stopped"); startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                 ok = true
             }
             else -> error("Unknown phone tool: $name")
@@ -247,9 +268,11 @@ class PhoneAccessibilityService : AccessibilityService() {
             var bitmap: Bitmap? = null
             var failure = "Screenshot timed out."
             onMain {
+                assertAvailable()
                 takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
                     override fun onSuccess(result: ScreenshotResult) {
                         try {
+                            if(disabled) { failure="Phone control is off."; return }
                             val hw = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
                             bitmap = hw?.copy(Bitmap.Config.ARGB_8888, false)
                             hw?.recycle()
@@ -273,7 +296,7 @@ class PhoneAccessibilityService : AccessibilityService() {
             } finally { source.recycle() }
         } finally { onMain { overlay?.setHidden(false) } }
     }
-    fun showControls() { main.post { if (overlay == null) overlay = ControlOverlay(this); overlay?.show() } }
+    fun showControls() { main.post { if(disabled || instance!==this) return@post; if (overlay == null) overlay = ControlOverlay(this); overlay?.show() } }
     fun updateControls(label: String) { main.post { overlay?.update(label) } }
     fun hideControls() { main.post { overlay?.close(); overlay = null } }
 }

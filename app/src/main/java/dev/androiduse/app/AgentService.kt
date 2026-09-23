@@ -196,10 +196,20 @@ class AgentService : Service() {
             val wasStopped = stopped.get() || e is InterruptedException
             end(s, if (wasStopped) "STOPPED" else "ERROR", if (wasStopped) stopReason else e.message?.take(500) ?: "Task failed.")
         } finally {
-            client?.cancel(); PhoneAccessibilityService.instance?.hideControls()
-            current = null
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf(); AppState.changed()
+            client?.cancel()
+            // Stop interrupts this worker; terminal permission cleanup must still reach Android.
+            Thread.interrupted()
+            try {
+                PhoneAccessibilityService.instance?.let { phone ->
+                    phone.hideControls()
+                    if(Stores.autoDisablePhoneControl()) phone.turnOff(cancelAgent=false)
+                }
+            } catch(_: Exception) { s.log("error","Turn off Android Use manually in Accessibility settings.") }
+            finally {
+                current = null
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf(); AppState.changed()
+            }
         }
     }
     private fun end(s: Session, status: String, summary: String) {
